@@ -10,8 +10,6 @@ Or build in-place:
 """
 
 from setuptools import setup, Extension
-from setuptools.command.build_ext import build_ext
-import subprocess
 import sys
 import os
 
@@ -22,17 +20,18 @@ try:
 except ImportError:
     raise RuntimeError("pybind11 not found. Install with: pip install pybind11")
 
-# ─── Locate libxml2 ───────────────────────────────────────────────────────────
-def pkg_config(*args):
-    try:
-        return subprocess.check_output(
-            ["pkg-config"] + list(args), stderr=subprocess.DEVNULL
-        ).decode().split()
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return []
-
-
-extra_compile_args = ["-std=c++17", "-O3", "-DNDEBUG",
+# ─── Platform-specific flags ─────────────────────────────────────────────────
+if sys.platform == "win32":
+    extra_compile_args = ["/std:c++17", "/O2", "/DNDEBUG", "/EHsc"]
+    extra_link_args    = []
+else:
+    extra_compile_args = [
+        "-std=c++17",
+        "-O3",
+        "-DNDEBUG",
+        "-fvisibility=hidden",
+    ]
+    extra_link_args = ["-lz"]
 
 # ─── Source files ─────────────────────────────────────────────────────────────
 sources = [
@@ -40,6 +39,7 @@ sources = [
     "src/docx_parser.cpp",
     "src/batch_parser.cpp",
     "src/zip_reader.cpp",
+    "src/xml_parser.cpp",
 ]
 
 ext = Extension(

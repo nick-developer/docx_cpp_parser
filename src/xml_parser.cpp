@@ -26,7 +26,7 @@ static void decode_entities(const char* s, std::size_t len, std::string& out) {
     const char* end = s + len;
     while (s < end) {
         if (*s != '&') { out += *s++; continue; }
-        const char* amp = s++;
+        ++s; // skip '&'
         const char* semi = static_cast<const char*>(std::memchr(s, ';', static_cast<std::size_t>(end - s)));
         if (!semi) { out += '&'; continue; }
         std::string_view ref(s, static_cast<std::size_t>(semi - s));
@@ -65,7 +65,6 @@ static void decode_entities(const char* s, std::size_t len, std::string& out) {
             out += ';';
         }
         s = semi + 1;
-        (void)amp;
     }
 }
 
@@ -110,7 +109,7 @@ bool sax_parse(const char* data, std::size_t len, SaxHandler& h) {
     const char* end = data + len;
 
     // Reusable buffers to reduce allocations
-    std::string prefix, local, val, text_buf;
+    std::string prefix, local, text_buf;
 
     while (p < end) {
         if (*p != '<') {

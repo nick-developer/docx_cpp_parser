@@ -2,7 +2,6 @@
 
 #include <thread>
 #include <mutex>
-#include <atomic>
 #include <queue>
 #include <functional>
 #include <condition_variable>

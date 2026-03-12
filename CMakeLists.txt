@@ -34,12 +34,10 @@ target_include_directories(docx_comment_parser
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
     PRIVATE
-        
 )
 
 target_link_libraries(docx_comment_parser
     PRIVATE
-        
         ZLIB::ZLIB
 )
 
@@ -116,7 +114,6 @@ install(TARGETS docx_comment_parser
 install(FILES
     include/docx_comment_parser.h
     include/zip_reader.h
-    include/xml_utils.h
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/docx_comment_parser
 )
 

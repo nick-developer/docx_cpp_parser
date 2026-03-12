@@ -7,7 +7,7 @@
  *       -I$(python3 -c "import pybind11; print(pybind11.get_include())") \
  *       python_bindings.cpp ../src/docx_parser.cpp ../src/batch_parser.cpp \
  *       ../src/zip_reader.cpp \
- *       -lxml2 -lz \
+ *       -lz \
  *       -o docx_comment_parser$(python3-config --extension-suffix)
  *
  * Usage from Python:

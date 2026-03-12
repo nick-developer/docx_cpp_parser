@@ -3,7 +3,6 @@
 #include "xml_parser.h"
 
 #include <algorithm>
-#include <cassert>
 #include <set>
 #include <unordered_map>
 #include <functional>
