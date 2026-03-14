@@ -1,7 +1,24 @@
 #pragma once
 
+// ─── Symbol export/import macro ───────────────────────────────────────────────
+//
+// On Windows (MSVC and MinGW) DLL symbols must be explicitly exported by the
+// *building* translation unit and imported by *consuming* translation units.
+//
+//   DOCX_BUILDING_DLL  – defined by CMake / setup.py when compiling the library
+//                        itself; expands DOCX_API to __declspec(dllexport).
+//                        NOT defined when a downstream project includes this header,
+//                        so DOCX_API expands to __declspec(dllimport) instead.
+//
+// On Linux/macOS with -fvisibility=hidden the macro marks symbols as default
+// visibility so the linker exports them even though the TU default is hidden.
+
 #ifdef _WIN32
-  #define DOCX_API __declspec(dllexport)
+  #ifdef DOCX_BUILDING_DLL
+    #define DOCX_API __declspec(dllexport)
+  #else
+    #define DOCX_API __declspec(dllimport)
+  #endif
 #else
   #define DOCX_API __attribute__((visibility("default")))
 #endif
@@ -43,12 +60,12 @@ struct DOCX_API CommentMetadata {
 
     // --- content ---
     std::string text;                    // full plain-text of comment body
-    std::string paragraph_style;        // style of first paragraph inside comment
+    std::string paragraph_style;         // style of first paragraph inside comment
 
     // --- anchoring ---
-    std::string range_start_para_id;    // w:commentRangeStart / paraId attribute (OOXML 2016+)
+    std::string range_start_para_id;     // w:commentRangeStart / paraId (OOXML 2016+)
     std::string range_end_para_id;
-    std::string referenced_text;        // the document text the comment is anchored to
+    std::string referenced_text;         // document text the comment is anchored to
 
     // --- threading (OOXML 2016+) ---
     bool        is_reply{false};
@@ -61,8 +78,8 @@ struct DOCX_API CommentMetadata {
     bool        done{false};             // @w16cex:done
 
     // --- document position ---
-    int         paragraph_index{-1};    // 0-based paragraph in document body
-    int         run_index{-1};          // 0-based run within that paragraph
+    int         paragraph_index{-1};     // 0-based paragraph in document body
+    int         run_index{-1};           // 0-based run within that paragraph
 
     // Convenience: resolved full thread chain (only set on root comments)
     std::vector<int> thread_ids;         // ordered list of ids in this thread
@@ -90,8 +107,8 @@ struct DOCX_API DocxParserError : std::runtime_error {
     explicit DocxParserError(const std::string& msg) : std::runtime_error(msg) {}
 };
 
-struct DOCX_API DocxFileError   : DocxParserError {
-    explicit DocxFileError(const std::string& msg)   : DocxParserError(msg) {}
+struct DOCX_API DocxFileError : DocxParserError {
+    explicit DocxFileError(const std::string& msg) : DocxParserError(msg) {}
 };
 
 struct DOCX_API DocxFormatError : DocxParserError {

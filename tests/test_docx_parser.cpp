@@ -18,7 +18,15 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
-#include <zlib.h>
+// On MSVC the test's in-memory ZIP builder uses crc32(), Bytef, and uInt.
+// The vendored header supplies all three without requiring a system zlib.
+// On Linux/macOS/MinGW the system <zlib.h> is used (no IMPLEMENTATION define,
+// so the function bodies live only in zip_reader.cpp's TU).
+#ifdef _MSC_VER
+#  include "../vendor/zlib/zlib.h"
+#else
+#  include <zlib.h>
+#endif
 
 // ─── Minimal ZIP writer (stored entries only – good enough for testing) ───────
 

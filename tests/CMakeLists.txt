@@ -13,7 +13,11 @@
 cmake_minimum_required(VERSION 3.15)
 
 # ─── zlib is needed by the test's own ZIP builder (uses crc32/inflate) ────────
-find_package(ZLIB REQUIRED)
+# On MSVC the vendored zlib.h is used (same as zip_reader.cpp).
+# On Linux/macOS/MinGW we link the system libz.
+if(NOT MSVC)
+  find_package(ZLIB REQUIRED)
+endif()
 
 # ─── Test executable ──────────────────────────────────────────────────────────
 add_executable(test_docx_parser
@@ -31,14 +35,17 @@ target_include_directories(test_docx_parser
     PRIVATE
         # Public headers of the library under test
         ${CMAKE_SOURCE_DIR}/include
+        # Vendor dir: test_docx_parser.cpp includes vendor/zlib/zlib.h on MSVC
+        $<$<CXX_COMPILER_ID:MSVC>:${CMAKE_SOURCE_DIR}/vendor>
 )
 
 target_link_libraries(test_docx_parser
     PRIVATE
         # The shared library being tested (provides docx:: API)
         docx_comment_parser
-        # zlib – the test's in-memory ZIP builder calls crc32()
-        ZLIB::ZLIB
+        # zlib — crc32() is called by the in-memory ZIP builder in the test.
+        # On MSVC the vendored header is used; no link step is needed there.
+        $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:ZLIB::ZLIB>
 )
 
 target_compile_options(test_docx_parser PRIVATE

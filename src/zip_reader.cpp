@@ -1,6 +1,17 @@
 #include "zip_reader.h"
 
-#include <zlib.h>
+// On MSVC there is no system zlib.  The vendored single-header implementation
+// in vendor/zlib/zlib.h covers exactly the API used here (inflate + CRC-32).
+// On Linux, macOS, and MinGW the system <zlib.h> is always available and
+// preferred (smaller binary, battle-tested, benefits from system updates).
+// VENDOR_ZLIB_IMPLEMENTATION activates the function bodies in this one TU only;
+// all other TUs include the header for declarations without re-defining anything.
+#ifdef _MSC_VER
+#  define VENDOR_ZLIB_IMPLEMENTATION
+#  include "../vendor/zlib/zlib.h"
+#else
+#  include <zlib.h>
+#endif
 #include <cstring>
 #include <cassert>
 #include <algorithm>

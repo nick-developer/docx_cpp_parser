@@ -148,8 +148,10 @@ bool sax_parse(const char* data, std::size_t len, SaxHandler& h) {
 
         // Processing instruction or XML declaration
         if (*p == '?') {
-            while (p < end && *p != '>') ++p;
-            if (p < end) ++p;
+            ++p;
+            // Scan for the closing "?>" sequence, not just ">"
+            while (p + 1 < end && !(p[0] == '?' && p[1] == '>')) ++p;
+            if (p + 1 < end) p += 2;  // skip "?>"
             continue;
         }
 
