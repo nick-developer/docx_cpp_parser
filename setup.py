@@ -101,7 +101,7 @@ ext = Extension(
 setup(
     name="docx-comment-parser",
     version="1.0.0",
-    author="Your Name",
+    author="nick-developer",
     description="Fast C++ library for extracting comment metadata from .docx files",
     long_description=open("README.md").read() if os.path.exists("README.md") else "",
     ext_modules=[ext],
