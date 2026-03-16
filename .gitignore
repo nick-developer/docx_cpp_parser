@@ -7,6 +7,3 @@
 BUILDING.md
 /.vscode
 /build
-test.py
-report.docx
-docx_comment_parser.pyd

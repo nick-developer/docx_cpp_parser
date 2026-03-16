@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools", "pybind11"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "docx-comment-parser"
+version = "1.0.0"
+description = "Fast C++ library for extracting comment metadata from .docx files"
+readme = "README.md"
+requires-python = ">=3.8"
+authors = [{name = "nick-developer"}]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: C++",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: MacOS",
+]

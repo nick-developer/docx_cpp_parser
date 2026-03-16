@@ -103,7 +103,7 @@ setup(
     version="1.0.0",
     author="nick-developer",
     description="Fast C++ library for extracting comment metadata from .docx files",
-    long_description=open("README.md").read() if os.path.exists("README.md") else "",
+    long_description=open("README.md", encoding="utf-8").read() if os.path.exists("README.md") else "",
     ext_modules=[ext],
     python_requires=">=3.8",
     classifiers=[
