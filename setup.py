@@ -19,6 +19,10 @@ import sys
 import os
 import subprocess
 
+# Absolute path to the directory containing this file, so include_dirs and
+# sources resolve correctly regardless of the working directory pip uses.
+ROOT = os.path.dirname(os.path.abspath(__file__))
+
 
 def _is_mingw() -> bool:
     """Return True when building with MinGW-w64 GCC under Windows."""
@@ -82,17 +86,21 @@ else:
 
 # ─── Source files ─────────────────────────────────────────────────────────────
 sources = [
-    "python/python_bindings.cpp",
-    "src/docx_parser.cpp",
-    "src/batch_parser.cpp",
-    "src/zip_reader.cpp",
-    "src/xml_parser.cpp",
+    os.path.join(ROOT, "python", "python_bindings.cpp"),
+    os.path.join(ROOT, "src", "docx_parser.cpp"),
+    os.path.join(ROOT, "src", "batch_parser.cpp"),
+    os.path.join(ROOT, "src", "zip_reader.cpp"),
+    os.path.join(ROOT, "src", "xml_parser.cpp"),
 ]
 
 ext = Extension(
     "docx_comment_parser",
     sources=sources,
-    include_dirs=["include", "vendor", pybind11_include],
+    include_dirs=[
+        os.path.join(ROOT, "include"),
+        os.path.join(ROOT, "vendor"),
+        pybind11_include,
+    ],
     extra_compile_args=extra_compile_args,
     extra_link_args=extra_link_args,
     language="c++",
@@ -103,7 +111,7 @@ setup(
     version="1.0.0",
     author="nick-developer",
     description="Fast C++ library for extracting comment metadata from .docx files",
-    long_description=open("README.md", encoding="utf-8").read() if os.path.exists("README.md") else "",
+    long_description=open(os.path.join(ROOT, "README.md"), encoding="utf-8").read() if os.path.exists(os.path.join(ROOT, "README.md")) else "",
     ext_modules=[ext],
     python_requires=">=3.8",
     classifiers=[
