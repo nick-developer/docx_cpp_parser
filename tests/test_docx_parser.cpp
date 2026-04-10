@@ -18,11 +18,16 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
-// On MSVC the test's in-memory ZIP builder uses crc32(), Bytef, and uInt.
-// The vendored header supplies all three without requiring a system zlib.
-// On Linux/macOS/MinGW the system <zlib.h> is used (no IMPLEMENTATION define,
-// so the function bodies live only in zip_reader.cpp's TU).
+// On MSVC the test's in-memory ZIP builder uses crc32(), Bytef, and uInt from
+// the vendored single-header zlib.  VENDOR_ZLIB_IMPLEMENTATION activates the
+// function bodies in this TU — the same flag zip_reader.cpp uses.  Each TU
+// that defines it gets its own private copy; there is no ODR conflict because
+// the test executable and the shared library are separate binaries.
+// Without this define the bodies live only inside the DLL and are not exported,
+// causing LNK2001 "unresolved external symbol crc32".
+// On Linux/macOS/MinGW the system <zlib.h> is used; crc32 is resolved via -lz.
 #ifdef _MSC_VER
+#  define VENDOR_ZLIB_IMPLEMENTATION
 #  include "../vendor/zlib/zlib.h"
 #else
 #  include <zlib.h>
@@ -185,6 +190,18 @@ static const char* DOCUMENT_XML = R"(<?xml version="1.0" encoding="UTF-8" standa
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+static std::string temp_docx_path() {
+    // /tmp does not exist on Windows; use %TEMP% / %TMP% instead.
+#ifdef _WIN32
+    const char* dir = std::getenv("TEMP");
+    if (!dir) dir   = std::getenv("TMP");
+    if (!dir) dir   = "C:\\Temp";
+    return std::string(dir) + "\\test_docx_parser_fixture.docx";
+#else
+    return "/tmp/test_docx_parser_fixture.docx";
+#endif
+}
+
 static std::string make_temp_docx() {
     ZipBuilder zb;
     zb.add("[Content_Types].xml",            CONTENT_TYPES);
@@ -196,8 +213,7 @@ static std::string make_temp_docx() {
 
     auto bytes = zb.build();
 
-    // Write to temp file
-    std::string path = "/tmp/test_docx_parser_fixture.docx";
+    std::string path = temp_docx_path();
     std::ofstream f(path, std::ios::binary);
     if (!f) throw std::runtime_error("Cannot create temp file: " + path);
     f.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
