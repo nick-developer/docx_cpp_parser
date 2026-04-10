@@ -1,10 +1,13 @@
 [build-system]
-requires = ["setuptools", "pybind11"]
-build-backend = "setuptools.build_meta"
+# scikit-build-core invokes CMake automatically, produces correctly tagged
+# platform wheels (e.g. cp311-cp311-win_amd64), and handles MSVC / MinGW /
+# GCC / Clang toolchains without any extra configuration.
+requires = ["scikit-build-core>=0.9", "pybind11>=2.12"]
+build-backend = "scikit_build_core.build"
 
 [project]
 name = "docx-comment-parser"
-version = "1.0.0"
+version = "1.1.1"
 description = "Fast C++ library for extracting comment metadata from .docx files"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -16,3 +19,17 @@ classifiers = [
     "Operating System :: Microsoft :: Windows",
     "Operating System :: MacOS",
 ]
+
+[tool.scikit-build]
+# Always build in Release mode for distributed wheels.
+cmake.build-type = "Release"
+
+# Pass extra CMake args:
+#   - disable the test suite (not needed inside the wheel)
+#   - disable the standalone shared library (the wheel only needs the Python
+#     extension; the extension itself compiles all C++ sources in via setup.py)
+cmake.args = ["-DBUILD_TESTS=OFF"]
+
+# The extension module is the only thing that goes into the wheel.
+# No Python source packages to collect.
+wheel.packages = []

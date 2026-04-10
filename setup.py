@@ -1,16 +1,22 @@
 """
 setup.py for docx_comment_parser Python extension.
 
-Build & install:
-    pip install pybind11
-    pip install .
+This file is kept as a fallback for environments that cannot use scikit-build-core.
+The recommended build path is:
 
-Or build in-place:
+    pip install scikit-build-core pybind11
+    pip install .            # uses pyproject.toml → scikit-build-core → CMake
+
+For a manual setuptools build (no CMake required):
+
+    pip install pybind11
+    pip install .             # setuptools falls back to this file
+    # or in-place:
     python setup.py build_ext --inplace
 
 Supported toolchains:
     Linux / macOS  : GCC or Clang          (uses -std=c++17, -lz)
-    Windows MSVC   : Visual Studio 2019+   (uses /std:c++17)
+    Windows MSVC   : Visual Studio 2019+   (uses /std:c++17, vendored zlib)
     Windows MinGW  : MinGW-w64 via MSYS2   (uses -std=c++17, -lz)
 """
 
@@ -19,8 +25,6 @@ import sys
 import os
 import subprocess
 
-# Absolute path to the directory containing this file, so include_dirs and
-# sources resolve correctly regardless of the working directory pip uses.
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -49,29 +53,37 @@ IS_MINGW = _is_mingw()
 IS_MSVC  = sys.platform == "win32" and not IS_MINGW
 
 if IS_MSVC:
-    # MSVC (cl.exe) — Visual Studio 2019 or later
+    # MSVC (cl.exe) — Visual Studio 2019 or later.
+    # zlib is provided by the vendored single-header in vendor/zlib/zlib.h
+    # (activated by VENDOR_ZLIB_IMPLEMENTATION inside zip_reader.cpp), so no
+    # external -lz is needed.
     extra_compile_args = [
         "/std:c++17",
         "/O2",
         "/DNDEBUG",
         "/EHsc",                    # enable C++ exception handling
-        "/DDOCX_BUILDING_DLL",      # expand DOCX_API to __declspec(dllexport)
+        "/DDOCX_BUILDING_DLL",      # DOCX_API → __declspec(dllexport)
     ]
-    extra_link_args = []            # zlib linked via vcpkg / find_package
+    extra_link_args = []
 
 elif IS_MINGW:
-    # MinGW-w64 GCC on Windows (MSYS2 / standalone)
+    # MinGW-w64 GCC on Windows (MSYS2 / standalone).
+    # Notes:
+    #   - DOCX_BUILDING_DLL is correct here because setup.py compiles ALL C++
+    #     sources directly into the single .pyd extension (not a separate DLL),
+    #     so the extension IS the thing that "builds" the symbols.
+    #   - -lmswsock is intentionally omitted: it is not needed for this library
+    #     and is absent from some MinGW-w64 installations, causing link failure.
+    #   - -lws2_32 is likewise unnecessary (no socket code in this library).
     extra_compile_args = [
         "-std=c++17",
         "-O2",
         "-DNDEBUG",
-        "-DDOCX_BUILDING_DLL",      # expand DOCX_API to __declspec(dllexport)
+        "-DDOCX_BUILDING_DLL",
         "-Wall",
     ]
     extra_link_args = [
         "-lz",                      # zlib1.dll — ships with every MinGW installation
-        "-lws2_32",                 # Winsock — required by std::thread on MinGW
-        "-lmswsock",
     ]
 
 else:
@@ -80,11 +92,14 @@ else:
         "-std=c++17",
         "-O3",
         "-DNDEBUG",
-        "-fvisibility=hidden",      # hide all symbols except those marked DOCX_API
+        "-fvisibility=hidden",
+        "-DDOCX_BUILDING_DLL",
     ]
     extra_link_args = ["-lz"]
 
 # ─── Source files ─────────────────────────────────────────────────────────────
+# All C++ sources are compiled directly into the single Python extension — there
+# is no separate docx_comment_parser.dll/so to distribute alongside the wheel.
 sources = [
     os.path.join(ROOT, "python", "python_bindings.cpp"),
     os.path.join(ROOT, "src", "docx_parser.cpp"),
@@ -98,7 +113,7 @@ ext = Extension(
     sources=sources,
     include_dirs=[
         os.path.join(ROOT, "include"),
-        os.path.join(ROOT, "vendor"),
+        os.path.join(ROOT, "vendor"),   # vendored zlib.h for MSVC
         pybind11_include,
     ],
     extra_compile_args=extra_compile_args,
@@ -108,10 +123,14 @@ ext = Extension(
 
 setup(
     name="docx-comment-parser",
-    version="1.0.0",
+    version="1.1.1",
     author="nick-developer",
     description="Fast C++ library for extracting comment metadata from .docx files",
-    long_description=open(os.path.join(ROOT, "README.md"), encoding="utf-8").read() if os.path.exists(os.path.join(ROOT, "README.md")) else "",
+    long_description=(
+        open(os.path.join(ROOT, "README.md"), encoding="utf-8").read()
+        if os.path.exists(os.path.join(ROOT, "README.md"))
+        else ""
+    ),
     ext_modules=[ext],
     python_requires=">=3.8",
     classifiers=[

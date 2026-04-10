@@ -8,3 +8,5 @@ BUILDING.md
 /.vscode
 /build
 /dist
+.pypirc
+/build_mingw64
