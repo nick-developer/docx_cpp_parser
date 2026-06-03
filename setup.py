@@ -123,7 +123,7 @@ ext = Extension(
 
 setup(
     name="docx-comment-parser",
-    version="1.1.1",
+    version="1.1.2",
     author="nick-developer",
     description="Fast C++ library for extracting comment metadata from .docx files",
     long_description=(
@@ -132,7 +132,7 @@ setup(
         else ""
     ),
     ext_modules=[ext],
-    python_requires=">=3.8",
+    python_requires=">=3.9",
     classifiers=[
         "Programming Language :: Python :: 3",
         "Programming Language :: C++",

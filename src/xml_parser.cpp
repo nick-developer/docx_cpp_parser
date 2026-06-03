@@ -2,8 +2,354 @@
 #include <cctype>
 #include <cstring>
 #include <stack>
+#include <algorithm>
+#include <cstdint>
+
+#ifdef _WIN32
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  include <windows.h>
+#else
+#  if __has_include(<iconv.h>)
+#    include <iconv.h>
+#    include <cerrno>
+#    define DOCX_HAS_ICONV 1
+#  endif
+#endif
 
 namespace docx {
+
+// ─── Encoding detection and transcoding ──────────────────────────────────────
+
+// Scan the XML prolog (ASCII-compatible encodings only) for encoding="..."
+static std::string extract_xml_encoding_decl(const char* data, std::size_t len) {
+    const std::size_t scan = std::min(len, std::size_t(512));
+    const char* p   = data;
+    const char* end = data + scan;
+
+    // Skip UTF-8 BOM if present
+    if (scan >= 3 &&
+        (unsigned char)p[0] == 0xEF &&
+        (unsigned char)p[1] == 0xBB &&
+        (unsigned char)p[2] == 0xBF)
+        p += 3;
+
+    if (p + 5 > end) return {};
+    if (p[0]!='<'||p[1]!='?'||p[2]!='x'||p[3]!='m'||p[4]!='l') return {};
+
+    // Find the closing "?>"
+    const char* pi_end = p + 5;
+    while (pi_end + 1 < end && !(pi_end[0]=='?' && pi_end[1]=='>')) ++pi_end;
+
+    p += 5; // skip "<?xml"
+    while (p < pi_end) {
+        while (p < pi_end && (*p==' '||*p=='\t'||*p=='\n'||*p=='\r')) ++p;
+        if (p + 8 <= pi_end && std::strncmp(p, "encoding", 8) == 0) {
+            p += 8;
+            while (p < pi_end && (*p==' '||*p=='\t')) ++p;
+            if (p >= pi_end || *p != '=') { ++p; continue; }
+            ++p;
+            while (p < pi_end && (*p==' '||*p=='\t')) ++p;
+            if (p >= pi_end) break;
+            char q = *p++;
+            if (q != '"' && q != '\'') break;
+            const char* vs = p;
+            while (p < pi_end && *p != q) ++p;
+            std::string name(vs, p);
+            for (char& c : name)
+                c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+            return name;
+        }
+        // skip to next whitespace or end
+        while (p < pi_end && *p!=' '&&*p!='\t'&&*p!='\n'&&*p!='\r') ++p;
+    }
+    return {};
+}
+
+// Detect the encoding of an XML byte stream (BOM takes precedence over declaration).
+static std::string detect_encoding(const char* data, std::size_t len) {
+    if (len == 0) return "UTF-8";
+    const auto* b = reinterpret_cast<const uint8_t*>(data);
+
+    if (len >= 4) {
+        if (b[0]==0x00 && b[1]==0x00 && b[2]==0xFE && b[3]==0xFF) return "UTF-32BE";
+        if (b[0]==0xFF && b[1]==0xFE && b[2]==0x00 && b[3]==0x00) return "UTF-32LE";
+    }
+    if (len >= 3 && b[0]==0xEF && b[1]==0xBB && b[2]==0xBF) return "UTF-8-BOM";
+    if (len >= 2) {
+        if (b[0]==0xFF && b[1]==0xFE) return "UTF-16LE";
+        if (b[0]==0xFE && b[1]==0xFF) return "UTF-16BE";
+    }
+
+    std::string decl = extract_xml_encoding_decl(data, len);
+    return decl.empty() ? "UTF-8" : decl;
+}
+
+// ─── Built-in UTF-32 and UTF-16 converters (no platform dependency) ──────────
+
+static std::string utf32_to_utf8(const char* data, std::size_t len, bool le) {
+    std::string out;
+    out.reserve(len / 2);
+    const auto* p   = reinterpret_cast<const uint8_t*>(data);
+    const auto* end = p + (len & ~std::size_t(3));
+    while (p < end) {
+        uint32_t cp = le
+            ? ((uint32_t)p[0] | ((uint32_t)p[1]<<8) | ((uint32_t)p[2]<<16) | ((uint32_t)p[3]<<24))
+            : (((uint32_t)p[0]<<24) | ((uint32_t)p[1]<<16) | ((uint32_t)p[2]<<8) | (uint32_t)p[3]);
+        p += 4;
+        if (cp == 0) continue; // skip null code points (BOM artefacts)
+        if      (cp < 0x80)     { out += (char)cp; }
+        else if (cp < 0x800)    { out += (char)(0xC0|(cp>>6));  out += (char)(0x80|(cp&0x3F)); }
+        else if (cp < 0x10000)  { out += (char)(0xE0|(cp>>12)); out += (char)(0x80|((cp>>6)&0x3F)); out += (char)(0x80|(cp&0x3F)); }
+        else if (cp < 0x110000) { out += (char)(0xF0|(cp>>18)); out += (char)(0x80|((cp>>12)&0x3F)); out += (char)(0x80|((cp>>6)&0x3F)); out += (char)(0x80|(cp&0x3F)); }
+    }
+    return out;
+}
+
+static std::string utf16_to_utf8(const char* data, std::size_t len, bool le) {
+    std::string out;
+    out.reserve(len);
+    const auto* p   = reinterpret_cast<const uint8_t*>(data);
+    const auto* end = p + (len & ~std::size_t(1));
+    while (p < end) {
+        uint16_t u = le ? ((uint16_t)p[0] | ((uint16_t)p[1]<<8))
+                        : (((uint16_t)p[0]<<8) | (uint16_t)p[1]);
+        p += 2;
+        uint32_t cp = u;
+        if (u >= 0xD800 && u <= 0xDBFF && p < end) {
+            uint16_t lo = le ? ((uint16_t)p[0] | ((uint16_t)p[1]<<8))
+                             : (((uint16_t)p[0]<<8) | (uint16_t)p[1]);
+            if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                cp = 0x10000u + ((uint32_t)(u - 0xD800) << 10) + (lo - 0xDC00);
+                p += 2;
+            }
+        }
+        if (cp == 0) continue;
+        if      (cp < 0x80)     { out += (char)cp; }
+        else if (cp < 0x800)    { out += (char)(0xC0|(cp>>6));  out += (char)(0x80|(cp&0x3F)); }
+        else if (cp < 0x10000)  { out += (char)(0xE0|(cp>>12)); out += (char)(0x80|((cp>>6)&0x3F)); out += (char)(0x80|(cp&0x3F)); }
+        else                    { out += (char)(0xF0|(cp>>18)); out += (char)(0x80|((cp>>12)&0x3F)); out += (char)(0x80|((cp>>6)&0x3F)); out += (char)(0x80|(cp&0x3F)); }
+    }
+    return out;
+}
+
+// ─── Platform-specific MBCS → UTF-8 ─────────────────────────────────────────
+
+#ifdef _WIN32
+
+static UINT encoding_name_to_codepage(const std::string& enc) {
+    struct E { const char* name; UINT cp; };
+    static const E table[] = {
+        {"UTF-8",        65001}, {"UTF8",          65001},
+        {"US-ASCII",     20127}, {"ASCII",          20127},
+        {"WINDOWS-1250", 1250},  {"CP1250",         1250},
+        {"WINDOWS-1251", 1251},  {"CP1251",         1251},
+        {"WINDOWS-1252", 1252},  {"CP1252",         1252},
+        {"WINDOWS-1253", 1253},  {"CP1253",         1253},
+        {"WINDOWS-1254", 1254},  {"CP1254",         1254},
+        {"WINDOWS-1255", 1255},  {"CP1255",         1255},
+        {"WINDOWS-1256", 1256},  {"CP1256",         1256},
+        {"WINDOWS-1257", 1257},  {"CP1257",         1257},
+        {"WINDOWS-1258", 1258},  {"CP1258",         1258},
+        {"ISO-8859-1",  28591},  {"LATIN-1",       28591}, {"LATIN1",  28591},
+        {"ISO-8859-2",  28592},  {"LATIN-2",       28592}, {"LATIN2",  28592},
+        {"ISO-8859-3",  28593},
+        {"ISO-8859-4",  28594},
+        {"ISO-8859-5",  28595},
+        {"ISO-8859-6",  28596},
+        {"ISO-8859-7",  28597},
+        {"ISO-8859-8",  28598},
+        {"ISO-8859-9",  28599},  {"LATIN-5",       28599},
+        {"ISO-8859-10", 28600},
+        {"ISO-8859-13", 28603},
+        {"ISO-8859-14", 28604},
+        {"ISO-8859-15", 28605},  {"LATIN-9",       28605},
+        {"ISO-8859-16", 28606},
+        {"ISO-8859-11", 874},    {"TIS-620",          874}, {"TIS620",    874},
+        {"SHIFT-JIS",     932},  {"SHIFT_JIS",        932}, {"SJIS",      932}, {"MS932",   932},
+        {"GBK",           936},  {"GB2312",           936}, {"GB_2312",   936},
+        {"GB18030",     54936},
+        {"BIG5",          950},  {"BIG-5",            950},
+        {"EUC-JP",      20932},  {"EUCJP",          20932}, {"EUC_JP",  20932},
+        {"EUC-KR",      51949},  {"EUCKR",          51949}, {"EUC_KR",  51949},
+        {"EUC-CN",      51936},  {"EUCCN",          51936},
+        {"KOI8-R",      20866},  {"KOI8R",          20866},
+        {"KOI8-U",      21866},  {"KOI8U",          21866},
+        {"IBM850",        850},  {"CP850",            850},
+        {"IBM852",        852},  {"CP852",            852},
+        {"IBM866",        866},  {"CP866",            866},
+        {"IBM437",        437},  {"CP437",            437},
+        {"ISO-2022-JP", 50220},
+        {"ISO-2022-KR", 50225},
+    };
+    for (const auto& e : table)
+        if (enc == e.name) return e.cp;
+    return 65001; // fallback: UTF-8
+}
+
+static std::string win_mbcs_to_utf8(const char* data, int len, UINT cp) {
+    if (len <= 0) return {};
+    int wlen = MultiByteToWideChar(cp, 0, data, len, nullptr, 0);
+    if (wlen <= 0) return std::string(data, len);
+    std::wstring wide(wlen, L'\0');
+    MultiByteToWideChar(cp, 0, data, len, &wide[0], wlen);
+    int ulen = WideCharToMultiByte(CP_UTF8, 0, wide.data(), wlen, nullptr, 0, nullptr, nullptr);
+    if (ulen <= 0) return std::string(data, len);
+    std::string utf8(ulen, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, wide.data(), wlen, &utf8[0], ulen, nullptr, nullptr);
+    return utf8;
+}
+
+#elif defined(DOCX_HAS_ICONV)
+
+static std::string iconv_enc_name(const std::string& enc) {
+    struct A { const char* xml; const char* ic; };
+    static const A table[] = {
+        {"UTF-8",        "UTF-8"},   {"UTF8",        "UTF-8"},
+        {"US-ASCII",     "ASCII"},   {"ASCII",       "ASCII"},
+        {"WINDOWS-1250", "WINDOWS-1250"}, {"CP1250",  "WINDOWS-1250"},
+        {"WINDOWS-1251", "WINDOWS-1251"}, {"CP1251",  "WINDOWS-1251"},
+        {"WINDOWS-1252", "WINDOWS-1252"}, {"CP1252",  "WINDOWS-1252"},
+        {"WINDOWS-1253", "WINDOWS-1253"}, {"CP1253",  "WINDOWS-1253"},
+        {"WINDOWS-1254", "WINDOWS-1254"}, {"CP1254",  "WINDOWS-1254"},
+        {"WINDOWS-1255", "WINDOWS-1255"}, {"CP1255",  "WINDOWS-1255"},
+        {"WINDOWS-1256", "WINDOWS-1256"}, {"CP1256",  "WINDOWS-1256"},
+        {"WINDOWS-1257", "WINDOWS-1257"}, {"CP1257",  "WINDOWS-1257"},
+        {"WINDOWS-1258", "WINDOWS-1258"}, {"CP1258",  "WINDOWS-1258"},
+        {"ISO-8859-1",  "ISO-8859-1"},  {"LATIN-1",  "ISO-8859-1"}, {"LATIN1",  "ISO-8859-1"},
+        {"ISO-8859-2",  "ISO-8859-2"},  {"LATIN-2",  "ISO-8859-2"}, {"LATIN2",  "ISO-8859-2"},
+        {"ISO-8859-3",  "ISO-8859-3"},
+        {"ISO-8859-4",  "ISO-8859-4"},
+        {"ISO-8859-5",  "ISO-8859-5"},
+        {"ISO-8859-6",  "ISO-8859-6"},
+        {"ISO-8859-7",  "ISO-8859-7"},
+        {"ISO-8859-8",  "ISO-8859-8"},
+        {"ISO-8859-9",  "ISO-8859-9"},  {"LATIN-5",  "ISO-8859-9"},
+        {"ISO-8859-10", "ISO-8859-10"},
+        {"ISO-8859-11", "TIS-620"},     {"TIS-620",  "TIS-620"}, {"TIS620", "TIS-620"},
+        {"ISO-8859-13", "ISO-8859-13"},
+        {"ISO-8859-14", "ISO-8859-14"},
+        {"ISO-8859-15", "ISO-8859-15"}, {"LATIN-9",  "ISO-8859-15"},
+        {"ISO-8859-16", "ISO-8859-16"},
+        {"SHIFT-JIS",   "SHIFT_JIS"},   {"SHIFT_JIS","SHIFT_JIS"}, {"SJIS","SHIFT_JIS"}, {"MS932","SHIFT_JIS"},
+        {"GBK",         "GBK"},         {"GB2312",   "GBK"}, {"GB_2312","GBK"},
+        {"GB18030",     "GB18030"},
+        {"BIG5",        "BIG5"},        {"BIG-5",    "BIG5"},
+        {"EUC-JP",      "EUC-JP"},      {"EUCJP",    "EUC-JP"}, {"EUC_JP","EUC-JP"},
+        {"EUC-KR",      "EUC-KR"},      {"EUCKR",    "EUC-KR"}, {"EUC_KR","EUC-KR"},
+        {"EUC-CN",      "EUC-CN"},      {"EUCCN",    "EUC-CN"},
+        {"KOI8-R",      "KOI8-R"},      {"KOI8R",    "KOI8-R"},
+        {"KOI8-U",      "KOI8-U"},      {"KOI8U",    "KOI8-U"},
+        {"IBM850",      "IBM850"},       {"CP850",    "IBM850"},
+        {"IBM852",      "IBM852"},       {"CP852",    "IBM852"},
+        {"IBM866",      "IBM866"},       {"CP866",    "IBM866"},
+        {"IBM437",      "IBM437"},       {"CP437",    "IBM437"},
+        {"ISO-2022-JP", "ISO-2022-JP"},
+        {"ISO-2022-KR", "ISO-2022-KR"},
+        {"ISO-2022-CN", "ISO-2022-CN"},
+    };
+    for (const auto& a : table)
+        if (enc == a.xml) return a.ic;
+    return enc;
+}
+
+static std::string iconv_convert(const char* data, std::size_t len, const std::string& from) {
+    iconv_t cd = iconv_open("UTF-8", from.c_str());
+    if (cd == (iconv_t)-1) {
+        // Try with //TRANSLIT to substitute untranslatable characters
+        std::string try2 = from + "//TRANSLIT";
+        cd = iconv_open("UTF-8", try2.c_str());
+        if (cd == (iconv_t)-1) return std::string(data, len);
+    }
+
+    std::string out(len * 4, '\0');
+    char*       inp     = const_cast<char*>(data);
+    std::size_t inleft  = len;
+    char*       outp    = &out[0];
+    std::size_t outleft = out.size();
+
+    while (inleft > 0) {
+        std::size_t rc = iconv(cd, &inp, &inleft, &outp, &outleft);
+        if (rc == (std::size_t)-1) {
+            if (errno == E2BIG) {
+                std::size_t used = out.size() - outleft;
+                out.resize(out.size() * 2);
+                outp    = &out[0] + used;
+                outleft = out.size() - used;
+            } else {
+                // EILSEQ or EINVAL: skip one byte, emit U+FFFD
+                if (inleft > 0) { ++inp; --inleft; }
+                if (outleft >= 3) {
+                    *outp++ = '\xEF'; *outp++ = '\xBF'; *outp++ = '\xBD';
+                    outleft -= 3;
+                }
+            }
+        }
+    }
+    iconv(cd, nullptr, nullptr, &outp, &outleft); // flush shift state
+    iconv_close(cd);
+
+    out.resize(out.size() - outleft);
+    return out;
+}
+
+#endif // DOCX_HAS_ICONV
+
+// ─── Public entry point ───────────────────────────────────────────────────────
+
+std::string transcode_to_utf8(const char* data, std::size_t len) {
+    // Strip artificial trailing null added by callers for parser safety
+    if (len > 0 && data[len - 1] == '\0') --len;
+    if (len == 0) return {};
+
+    const auto* b   = reinterpret_cast<const uint8_t*>(data);
+    std::string enc = detect_encoding(data, len);
+
+    // ── UTF-32 (built-in converter, strip 4-byte BOM) ──
+    if (enc == "UTF-32LE") {
+        std::size_t skip = (len >= 4 && b[0]==0xFF && b[1]==0xFE && b[2]==0x00 && b[3]==0x00) ? 4 : 0;
+        return utf32_to_utf8(data + skip, len - skip, true);
+    }
+    if (enc == "UTF-32BE") {
+        std::size_t skip = (len >= 4 && b[0]==0x00 && b[1]==0x00 && b[2]==0xFE && b[3]==0xFF) ? 4 : 0;
+        return utf32_to_utf8(data + skip, len - skip, false);
+    }
+
+    // ── UTF-16 (built-in converter, strip 2-byte BOM) ──
+    if (enc == "UTF-16LE") {
+        std::size_t skip = (len >= 2 && b[0]==0xFF && b[1]==0xFE) ? 2 : 0;
+        return utf16_to_utf8(data + skip, len - skip, true);
+    }
+    if (enc == "UTF-16BE") {
+        std::size_t skip = (len >= 2 && b[0]==0xFE && b[1]==0xFF) ? 2 : 0;
+        return utf16_to_utf8(data + skip, len - skip, false);
+    }
+
+    // ── UTF-8 BOM: strip BOM, return rest ──
+    if (enc == "UTF-8-BOM")
+        return std::string(data + 3, len - 3);
+
+    // ── Plain UTF-8 / ASCII: no conversion needed ──
+    if (enc == "UTF-8" || enc == "US-ASCII" || enc == "ASCII")
+        return std::string(data, len);
+
+    // ── Everything else: platform conversion ──
+#ifdef _WIN32
+    UINT cp = encoding_name_to_codepage(enc);
+    if (cp == 65001) return std::string(data, len); // already UTF-8
+    return win_mbcs_to_utf8(data, static_cast<int>(len), cp);
+#elif defined(DOCX_HAS_ICONV)
+    std::string ic = iconv_enc_name(enc);
+    if (ic == "UTF-8") return std::string(data, len);
+    return iconv_convert(data, len, ic);
+#else
+    return std::string(data, len); // no conversion available; hope it's UTF-8
+#endif
+}
 
 // ─── Character helpers ────────────────────────────────────────────────────────
 
@@ -105,6 +451,13 @@ static bool parse_attr_value(const char*& p, const char* end, std::string& out) 
 // ─── SAX parser ───────────────────────────────────────────────────────────────
 
 bool sax_parse(const char* data, std::size_t len, SaxHandler& h) {
+    // Transcode to UTF-8 if the stream uses a different encoding.
+    // `input` owns the buffer when conversion was performed; otherwise it holds
+    // a copy of the (null-stripped) UTF-8 bytes.
+    std::string input = transcode_to_utf8(data, len);
+    data = input.data();
+    len  = input.size();
+
     const char* p   = data;
     const char* end = data + len;
 
@@ -149,9 +502,8 @@ bool sax_parse(const char* data, std::size_t len, SaxHandler& h) {
         // Processing instruction or XML declaration
         if (*p == '?') {
             ++p;
-            // Scan for the closing "?>" sequence, not just ">"
             while (p + 1 < end && !(p[0] == '?' && p[1] == '>')) ++p;
-            if (p + 1 < end) p += 2;  // skip "?>"
+            if (p + 1 < end) p += 2;
             continue;
         }
 
@@ -200,7 +552,6 @@ bool sax_parse(const char* data, std::size_t len, SaxHandler& h) {
             // Attribute
             std::string attr_prefix, attr_local;
             if (!parse_qname(p, end, attr_prefix, attr_local)) {
-                // Skip garbage char
                 ++p; continue;
             }
             skip_ws(p, end);
@@ -213,7 +564,6 @@ bool sax_parse(const char* data, std::size_t len, SaxHandler& h) {
                 parse_attr_value(p, end, a.value);
                 attrs.push_back(std::move(a));
             }
-            // Else: standalone attribute (rare in OOXML) – ignore
         }
 
         if (h.start_element) h.start_element(prefix, local, attrs);

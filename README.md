@@ -4,7 +4,7 @@ A C++17 shared library that extracts every piece of comment metadata from `.docx
 
 [![Tests](https://img.shields.io/badge/tests-38%20passing-brightgreen)](#testing)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue)](#building-the-shared-library)
-[![Python ≥ 3.8](https://img.shields.io/badge/python-%E2%89%A53.8-blue)](#python-quick-start)
+[![Python ≥ 3.9](https://img.shields.io/badge/python-%E2%89%A53.8-blue)](#python-quick-start)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](#license)
 
 ---
@@ -618,17 +618,39 @@ Expected output:
 Test fixture: /tmp/test_docx_parser_fixture.docx
 
 === test_basic_parsing ===
+
 === test_threading ===
+
 === test_done_flag ===
+
 === test_anchor_text ===
+
 === test_by_author ===
+
 === test_stats ===
+
 === test_root_comments ===
+
 === test_batch_parser ===
+
 === test_missing_file ===
 
+=== test_encoding_utf8_bom ===
+
+=== test_encoding_utf16le ===
+
+=== test_encoding_utf16be ===
+
+=== test_encoding_utf32le ===
+
+=== test_encoding_windows1252 ===
+
+=== test_encoding_iso8859_1 ===
+
+=== test_encoding_numeric_entities ===
+
 ──────────────────────────────
-Results: 38 passed, 0 failed
+Results: 66 passed, 0 failed
 ```
 
 The test binary exits with code `0` on full pass, `1` on any failure.
@@ -636,6 +658,41 @@ The test binary exits with code `0` on full pass, `1` on any failure.
 ---
 
 ## Changelog
+
+### v1.1.2 — Added multiple enconding support
+
+Included multiple text enconding support for a wide range of encondings. Updated unit tests for the new text enconding functionality.
+
+#### `src/xml_parser.cpp` — Added a complete encoding transcoding layer before the XML parser:
+
+`extract_xml_encoding_decl()` — scans the XML prolog for encoding="..."
+
+`detect_encoding()` — BOM detection (UTF-8/16/32 LE/BE) takes precedence, falls back to the XML declaration
+
+`utf16_to_utf8()` / `utf32_to_utf8()` — built-in converters (no platform dependency) with correct surrogate-pair handling
+
+**Windows path:** `win_mbcs_to_utf8()` via `MultiByteToWideChar` + `WideCharToMultiByte`; maps 60+ encoding names to Windows codepage numbers (all Windows-125x, ISO-8859-1..16, Asian, Cyrillic, Thai, OEM codepages)
+
+**Linux/macOS path:** `iconv_convert()` via `iconv(3)` with the same name alias table; handles `E2BIG`/`EILSEQ`/`EINVAL` gracefully
+`transcode_to_utf8()` — public entry point, called at the start of `sax_parse()` so all parsing paths (DOM and SAX) go through it automatically
+
+#### `include/xml_parser.h` — Exposed transcode_to_utf8() as a public API with full docstring.
+
+#### `CMakeLists.txt` — Added `find_package(Iconv QUIET)` for non-Windows targets; links `Iconv::Iconv` only when it's a separate library (not built into libc).
+
+#### `tests/test_docx_parser.cpp` — Added 7 encoding tests (66 total, all green):
+
+`test_encoding_utf8_bom` — UTF-8 BOM is silently stripped
+
+`test_encoding_utf16le` / `test_encoding_utf16be` — BOM-detected UTF-16
+
+`test_encoding_utf32le` — BOM-detected UTF-32
+
+`test_encoding_windows1252` — `encoding="windows-1252"` with ç, é, ä in content
+
+`test_encoding_iso8859_1` — `encoding="ISO-8859-1"` with é, ñ
+
+`test_encoding_numeric_entities` — `&#x4E2D;` (Chinese) and `&#233;` (é) references
 
 ### v1.1.0 — Inflate fix and zero-dependency MSVC support
 

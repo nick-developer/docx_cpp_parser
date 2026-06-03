@@ -96,4 +96,25 @@ std::string node_text(const XmlNode& node);
 /** Truncate a string to max_bytes (at a UTF-8 boundary). */
 std::string truncate_utf8(const std::string& s, std::size_t max_bytes);
 
+/**
+ * Convert an arbitrary-encoded XML byte stream to UTF-8.
+ *
+ * Detects encoding via BOM (UTF-8/16/32 LE/BE) and/or the XML declaration's
+ * encoding="..." attribute.  Supported encodings include:
+ *   - Unicode:  UTF-8, UTF-16 LE/BE, UTF-32 LE/BE (with or without BOM)
+ *   - European: ISO-8859-1..16, Windows-125x, KOI8-R/U, IBM OEM codepages
+ *   - Asian:    Shift-JIS, GBK/GB2312, GB18030, Big5, EUC-JP/KR/CN,
+ *               ISO-2022-JP/KR/CN
+ *   - Other:    TIS-620 (Thai), US-ASCII, and any encoding supported by the
+ *               platform's iconv (Linux/macOS) or MultiByteToWideChar (Windows).
+ *
+ * Returns the UTF-8 string.  If the input is already valid UTF-8 (the common
+ * case for OOXML), a copy is returned without any conversion overhead beyond
+ * a BOM strip if needed.
+ *
+ * A trailing NUL byte appended by callers for parser safety is silently
+ * stripped before conversion.
+ */
+std::string transcode_to_utf8(const char* data, std::size_t len);
+
 } // namespace docx

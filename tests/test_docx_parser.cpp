@@ -379,6 +379,288 @@ void test_missing_file() {
     CHECK(threw);
 }
 
+// ─── Encoding test helpers ────────────────────────────────────────────────────
+
+// Build a minimal UTF-16LE byte string (BOM + ASCII-only XML).
+// Handles ASCII characters only; sufficient for XML tag/attribute names.
+static std::string to_utf16le(const char* utf8_ascii) {
+    std::string out;
+    out += '\xFF'; out += '\xFE'; // BOM
+    for (const char* p = utf8_ascii; *p; ++p) {
+        unsigned char c = (unsigned char)*p;
+        if (c < 0x80) {
+            out += (char)c; out += '\0';
+        } else if ((c & 0xE0) == 0xC0 && p[1]) {
+            // 2-byte UTF-8 → one UTF-16 code unit
+            uint16_t cp = ((c & 0x1F) << 6) | ((unsigned char)p[1] & 0x3F);
+            ++p;
+            out += (char)(cp & 0xFF);
+            out += (char)(cp >> 8);
+        }
+    }
+    return out;
+}
+
+static std::string to_utf16be(const char* utf8_ascii) {
+    std::string out;
+    out += '\xFE'; out += '\xFF'; // BOM
+    for (const char* p = utf8_ascii; *p; ++p) {
+        unsigned char c = (unsigned char)*p;
+        if (c < 0x80) {
+            out += '\0'; out += (char)c;
+        } else if ((c & 0xE0) == 0xC0 && p[1]) {
+            uint16_t cp = ((c & 0x1F) << 6) | ((unsigned char)p[1] & 0x3F);
+            ++p;
+            out += (char)(cp >> 8);
+            out += (char)(cp & 0xFF);
+        }
+    }
+    return out;
+}
+
+static std::string to_utf32le(const char* utf8_ascii) {
+    std::string out;
+    // BOM: FF FE 00 00
+    out += '\xFF'; out += '\xFE'; out += '\x00'; out += '\x00';
+    for (const char* p = utf8_ascii; *p; ++p) {
+        unsigned char c = (unsigned char)*p;
+        uint32_t cp = c;
+        if ((c & 0xE0) == 0xC0 && p[1]) {
+            cp = ((c & 0x1F) << 6) | ((unsigned char)p[1] & 0x3F); ++p;
+        }
+        out += (char)(cp & 0xFF);
+        out += (char)((cp >> 8) & 0xFF);
+        out += (char)((cp >> 16) & 0xFF);
+        out += (char)((cp >> 24) & 0xFF);
+    }
+    return out;
+}
+
+// Make a single-comment docx using custom comments.xml bytes (arbitrary encoding).
+static std::string make_docx_with_comments(const std::string& comments_bytes,
+                                            const std::string& document_bytes = "") {
+    static const char* CT = R"(<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml"  ContentType="application/xml"/>
+  <Override PartName="/word/document.xml"
+    ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+  <Override PartName="/word/comments.xml"
+    ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/>
+</Types>)";
+    static const char* RELS_STR = R"(<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1"
+    Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument"
+    Target="word/document.xml"/>
+</Relationships>)";
+    static const char* WORD_RELS_STR = R"(<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1"
+    Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments"
+    Target="comments.xml"/>
+</Relationships>)";
+    static const char* DOC_STR = R"(<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body><w:p><w:r><w:t>test</w:t></w:r></w:p></w:body>
+</w:document>)";
+
+    ZipBuilder zb;
+    zb.add("[Content_Types].xml",          CT);
+    zb.add("_rels/.rels",                  RELS_STR);
+    zb.add("word/_rels/document.xml.rels", WORD_RELS_STR);
+    zb.add("word/comments.xml",            comments_bytes);
+    zb.add("word/document.xml",            document_bytes.empty() ? DOC_STR : document_bytes);
+
+    auto bytes = zb.build();
+    std::string path;
+#ifdef _WIN32
+    const char* dir = std::getenv("TEMP");
+    if (!dir) dir = std::getenv("TMP");
+    if (!dir) dir = "C:\\Temp";
+    path = std::string(dir) + "\\test_encoding_fixture.docx";
+#else
+    path = "/tmp/test_encoding_fixture.docx";
+#endif
+    std::ofstream f(path, std::ios::binary);
+    if (!f) throw std::runtime_error("Cannot create temp file: " + path);
+    f.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    return path;
+}
+
+// ─── Encoding tests ───────────────────────────────────────────────────────────
+
+void test_encoding_utf8_bom() {
+    std::cout << "\n=== test_encoding_utf8_bom ===\n";
+    // UTF-8 BOM prefix should be silently stripped
+    std::string xml =
+        "\xEF\xBB\xBF" // UTF-8 BOM
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        "<w:comments xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\n"
+        "  <w:comment w:id=\"0\" w:author=\"BOM Tester\" w:date=\"2024-06-01T00:00:00Z\" w:initials=\"BT\">\n"
+        "    <w:p><w:r><w:t>BOM test</w:t></w:r></w:p>\n"
+        "  </w:comment>\n"
+        "</w:comments>";
+
+    std::string path = make_docx_with_comments(xml);
+    docx::DocxParser p;
+    p.parse(path);
+    std::remove(path.c_str());
+
+    CHECK_EQ(p.comments().size(), 1u);
+    const auto* c = p.find_by_id(0);
+    CHECK(c != nullptr);
+    CHECK_EQ(c->author, std::string("BOM Tester"));
+    CHECK(c->text.find("BOM test") != std::string::npos);
+}
+
+void test_encoding_utf16le() {
+    std::cout << "\n=== test_encoding_utf16le ===\n";
+    // comments.xml as UTF-16LE with BOM
+    const char* xml_utf8 =
+        "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n"
+        "<w:comments xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\n"
+        "  <w:comment w:id=\"0\" w:author=\"UTF16 Tester\" w:date=\"2024-06-01T00:00:00Z\" w:initials=\"U16\">\n"
+        "    <w:p><w:r><w:t>UTF-16LE content</w:t></w:r></w:p>\n"
+        "  </w:comment>\n"
+        "</w:comments>";
+
+    std::string path = make_docx_with_comments(to_utf16le(xml_utf8));
+    docx::DocxParser p;
+    p.parse(path);
+    std::remove(path.c_str());
+
+    CHECK_EQ(p.comments().size(), 1u);
+    const auto* c = p.find_by_id(0);
+    CHECK(c != nullptr);
+    CHECK_EQ(c->author, std::string("UTF16 Tester"));
+    CHECK(c->text.find("UTF-16LE content") != std::string::npos);
+}
+
+void test_encoding_utf16be() {
+    std::cout << "\n=== test_encoding_utf16be ===\n";
+    const char* xml_utf8 =
+        "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n"
+        "<w:comments xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\n"
+        "  <w:comment w:id=\"0\" w:author=\"UTF16BE User\" w:date=\"2024-06-01T00:00:00Z\" w:initials=\"U16B\">\n"
+        "    <w:p><w:r><w:t>UTF-16BE content</w:t></w:r></w:p>\n"
+        "  </w:comment>\n"
+        "</w:comments>";
+
+    std::string path = make_docx_with_comments(to_utf16be(xml_utf8));
+    docx::DocxParser p;
+    p.parse(path);
+    std::remove(path.c_str());
+
+    CHECK_EQ(p.comments().size(), 1u);
+    const auto* c = p.find_by_id(0);
+    CHECK(c != nullptr);
+    CHECK_EQ(c->author, std::string("UTF16BE User"));
+    CHECK(c->text.find("UTF-16BE content") != std::string::npos);
+}
+
+void test_encoding_utf32le() {
+    std::cout << "\n=== test_encoding_utf32le ===\n";
+    const char* xml_utf8 =
+        "<?xml version=\"1.0\" encoding=\"UTF-32\"?>\n"
+        "<w:comments xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\n"
+        "  <w:comment w:id=\"0\" w:author=\"UTF32 Tester\" w:date=\"2024-06-01T00:00:00Z\" w:initials=\"U32\">\n"
+        "    <w:p><w:r><w:t>UTF-32LE content</w:t></w:r></w:p>\n"
+        "  </w:comment>\n"
+        "</w:comments>";
+
+    std::string path = make_docx_with_comments(to_utf32le(xml_utf8));
+    docx::DocxParser p;
+    p.parse(path);
+    std::remove(path.c_str());
+
+    CHECK_EQ(p.comments().size(), 1u);
+    const auto* c = p.find_by_id(0);
+    CHECK(c != nullptr);
+    CHECK_EQ(c->author, std::string("UTF32 Tester"));
+    CHECK(c->text.find("UTF-32LE content") != std::string::npos);
+}
+
+void test_encoding_windows1252() {
+    std::cout << "\n=== test_encoding_windows1252 ===\n";
+    // Build XML bytes with Windows-1252 encoded characters.
+    // \xe9 = é (U+00E9),  \xe7 = ç (U+00E7),  \xfc = ü (U+00FC)
+    // Expected UTF-8 after conversion:
+    //   é = \xC3\xA9,   ç = \xC3\xA7,   ü = \xC3\xBC
+    std::string xml =
+        std::string("<?xml version=\"1.0\" encoding=\"windows-1252\"?>\n"
+        "<w:comments xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\n"
+        "  <w:comment w:id=\"0\" w:author=\"Fran") + "\xE7" + "ois\""
+        " w:date=\"2024-06-01T00:00:00Z\" w:initials=\"F\">\n"
+        "    <w:p><w:r><w:t>caf" + "\xE9" + " und k\xE4" + "se</w:t></w:r></w:p>\n"
+        "  </w:comment>\n"
+        "</w:comments>";
+
+    std::string path = make_docx_with_comments(xml);
+    docx::DocxParser p;
+    p.parse(path);
+    std::remove(path.c_str());
+
+    CHECK_EQ(p.comments().size(), 1u);
+    const auto* c = p.find_by_id(0);
+    CHECK(c != nullptr);
+    // ç in UTF-8 is \xC3\xA7 — verify author contains it
+    CHECK(c->author.find("\xC3\xA7") != std::string::npos);   // ç
+    // é in UTF-8 is \xC3\xA9 — verify text contains it
+    CHECK(c->text.find("\xC3\xA9") != std::string::npos);      // é
+}
+
+void test_encoding_iso8859_1() {
+    std::cout << "\n=== test_encoding_iso8859_1 ===\n";
+    // ISO-8859-1 shares byte values with Unicode for U+00A0..U+00FF,
+    // so bytes \xE9 (\xe9) = é, \xF1 = ñ, \xDF = ß.
+    std::string xml =
+        std::string("<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?>\n"
+        "<w:comments xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\n"
+        "  <w:comment w:id=\"0\" w:author=\"Jos") + "\xE9" + "\""
+        " w:date=\"2024-06-01T00:00:00Z\" w:initials=\"J\">\n"
+        "    <w:p><w:r><w:t>espa\xF1" + "ol</w:t></w:r></w:p>\n"
+        "  </w:comment>\n"
+        "</w:comments>";
+
+    std::string path = make_docx_with_comments(xml);
+    docx::DocxParser p;
+    p.parse(path);
+    std::remove(path.c_str());
+
+    CHECK_EQ(p.comments().size(), 1u);
+    const auto* c = p.find_by_id(0);
+    CHECK(c != nullptr);
+    CHECK(c->author.find("\xC3\xA9") != std::string::npos);   // é in UTF-8
+    CHECK(c->text.find("\xC3\xB1")   != std::string::npos);   // ñ in UTF-8
+}
+
+void test_encoding_numeric_entities() {
+    std::cout << "\n=== test_encoding_numeric_entities ===\n";
+    // Numeric character references work regardless of encoding.
+    // U+00E9 é as decimal &#233; and hex &#xE9;
+    std::string xml =
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        "<w:comments xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\n"
+        "  <w:comment w:id=\"0\" w:author=\"&#x4E2D;&#x6587;\" w:date=\"2024-06-01T00:00:00Z\" w:initials=\"CN\">\n"
+        "    <w:p><w:r><w:t>caf&#233; &#x4E2D;&#x6587;</w:t></w:r></w:p>\n"
+        "  </w:comment>\n"
+        "</w:comments>";
+
+    std::string path = make_docx_with_comments(xml);
+    docx::DocxParser p;
+    p.parse(path);
+    std::remove(path.c_str());
+
+    CHECK_EQ(p.comments().size(), 1u);
+    const auto* c = p.find_by_id(0);
+    CHECK(c != nullptr);
+    // &#x4E2D; = 中 (U+4E2D) in UTF-8 = \xE4\xB8\xAD
+    CHECK(c->author.find("\xE4\xB8\xAD") != std::string::npos);
+    // café should contain é = \xC3\xA9
+    CHECK(c->text.find("\xC3\xA9") != std::string::npos);
+}
+
 // ─── main ─────────────────────────────────────────────────────────────────────
 
 int main() {
@@ -400,6 +682,15 @@ int main() {
     test_root_comments(path);
     test_batch_parser(path);
     test_missing_file();
+
+    // Encoding tests (each creates and cleans its own fixture)
+    test_encoding_utf8_bom();
+    test_encoding_utf16le();
+    test_encoding_utf16be();
+    test_encoding_utf32le();
+    test_encoding_windows1252();
+    test_encoding_iso8859_1();
+    test_encoding_numeric_entities();
 
     std::remove(path.c_str());
 

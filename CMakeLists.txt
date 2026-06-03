@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(docx_comment_parser VERSION 1.1.1 LANGUAGES CXX)
+project(docx_comment_parser VERSION 1.1.2 LANGUAGES CXX)
 
 # ─── Policy: normalise install() DESTINATION paths (fixes CMP0177 warning) ───
 if(POLICY CMP0177)
@@ -32,6 +32,14 @@ if(NOT MSVC)
   find_package(ZLIB REQUIRED)
 endif()
 
+# ─── iconv (encoding transcoding) ─────────────────────────────────────────────
+# Windows uses the native MultiByteToWideChar/WideCharToMultiByte APIs (no
+# extra library).  On Linux/macOS iconv is typically part of the C library; on
+# musl or standalone environments a separate libiconv may be needed.
+if(NOT WIN32)
+  find_package(Iconv QUIET)  # sets Iconv::Iconv; harmless no-op when built-in
+endif()
+
 # ─── Common compile options helper ────────────────────────────────────────────
 # Applied to every target that compiles the library sources.
 function(docx_apply_compile_options target)
@@ -61,6 +69,9 @@ function(docx_link_platform_libs target)
   target_link_libraries(${target} PRIVATE
       $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:ZLIB::ZLIB>
   )
+  if(NOT WIN32 AND Iconv_FOUND AND NOT Iconv_IS_BUILT_IN)
+    target_link_libraries(${target} PRIVATE Iconv::Iconv)
+  endif()
   if(MINGW AND _has_pthread_h)
     target_link_libraries(${target} PRIVATE -lpthread)
   endif()

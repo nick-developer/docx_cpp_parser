@@ -10,3 +10,5 @@ BUILDING.md
 .pypirc
 /build_mingw64
 /build_msvc
+/dist
+/out

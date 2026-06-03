@@ -26,16 +26,36 @@ jobs:
       - name: Build wheels
         uses: pypa/cibuildwheel@v2.22.0
         env:
-          # CPython 3.8 – 3.14 only; skip PyPy (not tested with this extension)
-          CIBW_BUILD: cp38-* cp39-* cp310-* cp311-* cp312-* cp313-* cp314-*
-          # Skip musl/Alpine — system zlib may not be present in all musl images
+          # CPython 3.9 – 3.14; skip PyPy (not validated with this extension).
+          # Python 3.8 reached EOL October 2024 and is no longer built.
+          CIBW_BUILD: cp39-* cp310-* cp311-* cp312-* cp313-* cp314-*
+
+          # Skip musllinux (Alpine / musl libc) on all architectures.
+          # Two runtime dependencies are unavailable in the default musl images:
+          #   • zlib development headers  (needed at build time)
+          #   • iconv (encoding transcoding) — musl libc does not include iconv;
+          #     a separate libiconv package would be required.
+          # Re-enable and add a CIBW_BEFORE_BUILD step if musl support is needed.
           CIBW_SKIP: "*-musllinux_*"
-          # macOS: build both Intel and Apple-Silicon wheels
+
+          # macOS: build both Intel and Apple-Silicon wheels in a single job via
+          # cross-compilation (no separate runner needed for arm64).
           CIBW_ARCHS_MACOS: x86_64 arm64
-          # Linux: x86_64 only (add aarch64 later via QEMU if needed)
+
+          # Linux manylinux: x86_64 only.
+          # Add aarch64 later via QEMU (CIBW_ARCHS_LINUX: x86_64 aarch64 +
+          # CIBW_BEFORE_ALL_LINUX steps) if an ARM release is needed.
           CIBW_ARCHS_LINUX: x86_64
-          # Windows: 64-bit only
+
+          # Windows: 64-bit only.
           CIBW_ARCHS_WINDOWS: AMD64
+
+          # manylinux pre-build: ensure zlib development headers are present.
+          # iconv is part of glibc in all manylinux images — no extra install.
+          CIBW_BEFORE_BUILD_LINUX: yum install -y zlib-devel || apt-get install -y zlib1g-dev || true
+
+          # macOS pre-build: zlib and iconv are in the Xcode SDK; no extra step.
+          # Windows: zlib is vendored (vendor/zlib/zlib.h); iconv uses Win32 API.
 
       - uses: actions/upload-artifact@v4
         with:
@@ -54,10 +74,11 @@ jobs:
         with:
           python-version: "3.x"
 
+      - name: Install build frontend
+        run: python -m pip install build
+
       - name: Build sdist
-        run: |
-          python -m pip install build
-          python -m build --sdist
+        run: python -m build --sdist
 
       - uses: actions/upload-artifact@v4
         with:
@@ -71,7 +92,7 @@ jobs:
     needs: [build-wheels, build-sdist]
 
     permissions:
-      # Required for OIDC Trusted Publishing — no API token needed
+      # Required for OIDC Trusted Publishing — no API token needed.
       id-token: write
 
     environment:
