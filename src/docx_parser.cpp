@@ -237,6 +237,12 @@ struct DocxParser::Impl {
 
     void parse(const std::string& path) {
         comments_.clear(); id_to_idx_.clear();
+        // Reset stats up front.  The two early returns below (no comments part,
+        // or an empty one) used to skip compute_stats() entirely, so re-using a
+        // parser left the previous document's statistics — including its
+        // file_path — visible after parsing a comment-free file.
+        stats_ = DocumentCommentStats{};
+        stats_.file_path = path;
         ZipReader zip;
         try { zip.open(path); } catch (const ZipError& e) { throw DocxFileError(e.what()); }
         if (!zip.has_entry("word/comments.xml")) return;

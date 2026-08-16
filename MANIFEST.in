@@ -2,3 +2,7 @@ recursive-include include *.h
 recursive-include vendor *.h *.c
 recursive-include src *.cpp *.h
 recursive-include python *.cpp
+
+# Pure-Python wrapper package (exporters, filters, CLI) and its type markers.
+recursive-include src/docx_comment_parser *.py *.pyi
+include src/docx_comment_parser/py.typed

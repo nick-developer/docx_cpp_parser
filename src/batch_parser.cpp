@@ -1,5 +1,6 @@
 #include "docx_comment_parser.h"
 
+#include <algorithm>
 #include <thread>
 #include <mutex>
 #include <queue>
@@ -140,6 +141,17 @@ const DocumentCommentStats& BatchParser::stats(const std::string& fp) const {
 
 const std::unordered_map<std::string, std::string>& BatchParser::errors() const noexcept {
     return impl_->errors_;
+}
+
+std::vector<std::string> BatchParser::parsed_files() const {
+    std::lock_guard<std::mutex> lk(impl_->mu_);
+    std::vector<std::string> out;
+    out.reserve(impl_->results_.size());
+    for (const auto& kv : impl_->results_) out.push_back(kv.first);
+    // results_ is an unordered_map, so sort for a deterministic caller-visible
+    // order — exports and CLI output must not shuffle between runs.
+    std::sort(out.begin(), out.end());
+    return out;
 }
 
 void BatchParser::release(const std::string& fp) {

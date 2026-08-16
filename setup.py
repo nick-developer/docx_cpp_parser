@@ -20,7 +20,7 @@ Supported toolchains:
     Windows MinGW  : MinGW-w64 via MSYS2   (uses -std=c++17, -lz)
 """
 
-from setuptools import setup, Extension
+from setuptools import setup, Extension, find_packages
 import sys
 import os
 import subprocess
@@ -108,8 +108,11 @@ sources = [
     os.path.join(ROOT, "src", "xml_parser.cpp"),
 ]
 
+# The extension is a submodule of the pure-Python package in src/, hence the
+# dotted name: it is imported as docx_comment_parser._core and re-exported by
+# docx_comment_parser/__init__.py.
 ext = Extension(
-    "docx_comment_parser",
+    "docx_comment_parser._core",
     sources=sources,
     include_dirs=[
         os.path.join(ROOT, "include"),
@@ -123,7 +126,7 @@ ext = Extension(
 
 setup(
     name="docx-comment-parser",
-    version="1.1.2",
+    version="1.2.0",
     author="nick-developer",
     description="Fast C++ library for extracting comment metadata from .docx files",
     long_description=(
@@ -131,8 +134,24 @@ setup(
         if os.path.exists(os.path.join(ROOT, "README.md"))
         else ""
     ),
+    long_description_content_type="text/markdown",
     ext_modules=[ext],
+    # Pure-Python wrapper package (exporters, filters, CLI) lives in src/.
+    packages=find_packages(where="src"),
+    package_dir={"": "src"},
+    package_data={"docx_comment_parser": ["py.typed", "*.pyi"]},
     python_requires=">=3.9",
+    extras_require={
+        "pandas": ["pandas>=2.0"],
+        "polars": ["polars>=1.0"],
+        "cli": ["typer>=0.12", "rich>=13.0"],
+        "all": ["pandas>=2.0", "polars>=1.0", "typer>=0.12", "rich>=13.0"],
+    },
+    entry_points={
+        "console_scripts": [
+            "docx-comments = docx_comment_parser.cli:main",
+        ],
+    },
     classifiers=[
         "Programming Language :: Python :: 3",
         "Programming Language :: C++",

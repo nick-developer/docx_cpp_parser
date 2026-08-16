@@ -208,6 +208,13 @@ public:
     /** Map of file_path → error message for files that failed. */
     const std::unordered_map<std::string, std::string>& errors() const noexcept;
 
+    /**
+     * Paths of the files that parsed successfully and still hold results,
+     * sorted lexicographically.  Files that failed (see errors()) and files
+     * already passed to release() are not included.
+     */
+    std::vector<std::string> parsed_files() const;
+
     /** Free the results for a specific file to reclaim memory. */
     void release(const std::string& file_path);
 

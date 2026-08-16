@@ -104,7 +104,13 @@ if(DEFINED SKBUILD)
   endif()
 
   # Single module — all sources compiled in, no runtime DLL dependency.
-  pybind11_add_module(docx_comment_parser MODULE
+  #
+  # The CMake target is called docx_core, but OUTPUT_NAME makes the built file
+  # "_core.pyd" / "_core.so" so Python finds PyInit__core, matching
+  # PYBIND11_MODULE(_core, m) in python_bindings.cpp.  It is installed *inside*
+  # the docx_comment_parser package directory, next to the pure-Python sources
+  # collected via [tool.scikit-build] wheel.packages.
+  pybind11_add_module(docx_core MODULE
       python/python_bindings.cpp
       src/docx_parser.cpp
       src/batch_parser.cpp
@@ -112,21 +118,23 @@ if(DEFINED SKBUILD)
       src/xml_parser.cpp
   )
 
+  set_target_properties(docx_core PROPERTIES OUTPUT_NAME "_core")
+
   # DOCX_BUILDING_DLL is correct here: the extension IS building the symbols
   # (not importing them from a separate DLL).
-  target_compile_definitions(docx_comment_parser PRIVATE DOCX_BUILDING_DLL)
+  target_compile_definitions(docx_core PRIVATE DOCX_BUILDING_DLL)
 
-  target_include_directories(docx_comment_parser PRIVATE
+  target_include_directories(docx_core PRIVATE
       ${CMAKE_CURRENT_SOURCE_DIR}/include
       # Vendored zlib.h for MSVC (activated inside zip_reader.cpp)
       $<$<CXX_COMPILER_ID:MSVC>:${CMAKE_CURRENT_SOURCE_DIR}/vendor>
   )
 
-  docx_apply_compile_options(docx_comment_parser)
-  docx_link_platform_libs(docx_comment_parser)
+  docx_apply_compile_options(docx_core)
+  docx_link_platform_libs(docx_core)
 
-  install(TARGETS docx_comment_parser
-      DESTINATION "${SKBUILD_PLATLIB_DIR}"
+  install(TARGETS docx_core
+      DESTINATION "${SKBUILD_PLATLIB_DIR}/docx_comment_parser"
   )
 
   # Nothing else to build in wheel mode — skip the rest of this file.
@@ -202,18 +210,36 @@ if(BUILD_PYTHON_BINDINGS)
 
     if(pybind11_FOUND)
         # Distinct CMake target name avoids collision with the SHARED library
-        # target above.  OUTPUT_NAME makes the file "docx_comment_parser.pyd"
-        # so Python's import machinery finds PyInit_docx_comment_parser.
-        # (The old name "_docx_comment_parser" caused an ImportError because
-        # Python looked for PyInit__docx_comment_parser — note the double
-        # underscore — which never existed.)
+        # target above.  OUTPUT_NAME makes the file "_core.pyd" / "_core.so" so
+        # Python's import machinery finds PyInit__core, matching
+        # PYBIND11_MODULE(_core, m) in python_bindings.cpp.
+        #
+        # The extension is a *submodule* of the docx_comment_parser package, so
+        # it is written straight into src/docx_comment_parser/ — that makes an
+        # in-place CMake build immediately importable via PYTHONPATH=src, and
+        # the install rule below drops it beside the installed package.
         pybind11_add_module(docx_py_ext MODULE
             python/python_bindings.cpp
         )
 
+        set(_docx_pkg_dir "${CMAKE_CURRENT_SOURCE_DIR}/src/docx_comment_parser")
+
         set_target_properties(docx_py_ext PROPERTIES
-            OUTPUT_NAME "docx_comment_parser"
+            OUTPUT_NAME "_core"
+            LIBRARY_OUTPUT_DIRECTORY "${_docx_pkg_dir}"
+            RUNTIME_OUTPUT_DIRECTORY "${_docx_pkg_dir}"
         )
+
+        # Multi-config generators (Visual Studio, Xcode) append a per-config
+        # subdirectory to *_OUTPUT_DIRECTORY unless the per-config variant is
+        # set explicitly.  Without this the .pyd lands in
+        # src/docx_comment_parser/Release/ and is not importable in place.
+        foreach(_cfg IN ITEMS DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+            set_target_properties(docx_py_ext PROPERTIES
+                LIBRARY_OUTPUT_DIRECTORY_${_cfg} "${_docx_pkg_dir}"
+                RUNTIME_OUTPUT_DIRECTORY_${_cfg} "${_docx_pkg_dir}"
+            )
+        endforeach()
 
         # Do NOT define DOCX_BUILDING_DLL: this extension links against the
         # shared library above, so DOCX_API must expand to __declspec(dllimport).
@@ -231,9 +257,18 @@ if(BUILD_PYTHON_BINDINGS)
             target_link_libraries(docx_py_ext PRIVATE -lpthread)
         endif()
 
+        # Install the extension *and* the pure-Python package that wraps it, so
+        # a plain `cmake --install` yields a working `import docx_comment_parser`.
         install(TARGETS docx_py_ext
-            LIBRARY DESTINATION "${Python3_SITEARCH}"
-            RUNTIME DESTINATION "${Python3_SITEARCH}"
+            LIBRARY DESTINATION "${Python3_SITEARCH}/docx_comment_parser"
+            RUNTIME DESTINATION "${Python3_SITEARCH}/docx_comment_parser"
+        )
+
+        install(DIRECTORY "${_docx_pkg_dir}/"
+            DESTINATION "${Python3_SITEARCH}/docx_comment_parser"
+            FILES_MATCHING
+                PATTERN "*.py"
+                PATTERN "py.typed"
         )
     else()
         message(WARNING

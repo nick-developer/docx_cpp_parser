@@ -10,7 +10,13 @@
  *       -lz \
  *       -o docx_comment_parser$(python3-config --extension-suffix)
  *
- * Usage from Python:
+ * Module name
+ * -----------
+ * This extension is the compiled *core* of the ``docx_comment_parser`` package
+ * and is therefore named ``_core``.  End users never import it directly — the
+ * pure-Python package ``src/docx_comment_parser/__init__.py`` re-exports every
+ * public name from here, so the historical import path is unchanged:
+ *
  *   import docx_comment_parser as dcp
  *   parser = dcp.DocxParser()
  *   parser.parse("my_file.docx")
@@ -27,11 +33,42 @@
 namespace py = pybind11;
 using namespace docx;
 
-PYBIND11_MODULE(docx_comment_parser, m) {
+namespace {
+
+// Python exception types, created in the module initialiser below.  The module
+// dict holds the owning references for the life of the interpreter, so these
+// are borrowed handles.
+//
+// They live at file scope because pybind11's ExceptionTranslator is a plain
+// function pointer: the translator must be capture-less.
+PyObject* g_exc_parser = nullptr;
+PyObject* g_exc_file   = nullptr;
+PyObject* g_exc_format = nullptr;
+
+void translate_docx_exception(std::exception_ptr p) {
+    try {
+        if (p) std::rethrow_exception(p);
+    }
+    // Most-derived first: the first matching clause wins.  Registering three
+    // separate translators would not work, because pybind11 tries them in
+    // reverse registration order and the base-class handler would swallow every
+    // derived type before the specific ones were reached.
+    catch (const DocxFileError&   e) { PyErr_SetString(g_exc_file,   e.what()); }
+    catch (const DocxFormatError& e) { PyErr_SetString(g_exc_format, e.what()); }
+    catch (const DocxParserError& e) { PyErr_SetString(g_exc_parser, e.what()); }
+}
+
+} // anonymous namespace
+
+PYBIND11_MODULE(_core, m) {
     m.doc() = R"doc(
-docx_comment_parser
-===================
-Fast C++ library for extracting all comment metadata from .docx files.
+docx_comment_parser._core
+=========================
+Compiled C++ core for extracting all comment metadata from .docx files.
+
+Import the parent package instead of this module:
+
+    import docx_comment_parser as dcp
 
 Classes
 -------
@@ -299,6 +336,10 @@ file_paths : list[str]
                  return d;
              },
              "Return dict of {file_path: error_message} for files that failed.")
+        .def("parsed_files",
+             &BatchParser::parsed_files,
+             "Return sorted list of file paths that parsed successfully and "
+             "still hold results (released files are excluded).")
         .def("release",
              &BatchParser::release,
              py::arg("file_path"),
@@ -308,7 +349,50 @@ file_paths : list[str]
              "Free memory for all parsed files.");
 
     // ── Exception types ───────────────────────────────────────────────────────
-    py::register_exception<DocxFileError>  (m, "DocxFileError",   PyExc_IOError);
-    py::register_exception<DocxFormatError>(m, "DocxFormatError", PyExc_ValueError);
-    py::register_exception<DocxParserError>(m, "DocxParserError", PyExc_RuntimeError);
+    //
+    // These are built by hand rather than with py::register_exception() for two
+    // reasons:
+    //
+    //  1. Hierarchy.  register_exception() accepts a single base, so the C++
+    //     relationship (DocxFileError : DocxParserError) could not be expressed
+    //     alongside the historical builtin bases.  PyErr_NewException accepts a
+    //     *tuple* of bases, so DocxFileError can be both a DocxParserError and
+    //     an OSError.  Existing `except OSError` / `except ValueError` /
+    //     `except DocxParserError` code keeps working, and `except
+    //     DocxFileError` starts working.
+    //
+    //  2. Dispatch order.  pybind11 tries exception translators in reverse
+    //     registration order, so the previously-last-registered DocxParserError
+    //     handler caught every derived type first — DocxFileError and
+    //     DocxFormatError could never actually be raised.  The single
+    //     translate_docx_exception() above, with most-derived-first catch
+    //     clauses, fixes that.
+
+    py::object exc_parser = py::reinterpret_steal<py::object>(
+        PyErr_NewException("docx_comment_parser._core.DocxParserError",
+                           PyExc_RuntimeError, nullptr));
+
+    py::object file_bases = py::make_tuple(
+        exc_parser, py::reinterpret_borrow<py::object>(py::handle(PyExc_OSError)));
+    py::object exc_file = py::reinterpret_steal<py::object>(
+        PyErr_NewException("docx_comment_parser._core.DocxFileError",
+                           file_bases.ptr(), nullptr));
+
+    py::object format_bases = py::make_tuple(
+        exc_parser, py::reinterpret_borrow<py::object>(py::handle(PyExc_ValueError)));
+    py::object exc_format = py::reinterpret_steal<py::object>(
+        PyErr_NewException("docx_comment_parser._core.DocxFormatError",
+                           format_bases.ptr(), nullptr));
+
+    m.add_object("DocxParserError", exc_parser);
+    m.add_object("DocxFileError",   exc_file);
+    m.add_object("DocxFormatError", exc_format);
+
+    // The module dict now owns a reference to each type for the life of the
+    // interpreter, so the translator holds plain borrowed handles.
+    g_exc_parser = exc_parser.ptr();
+    g_exc_file   = exc_file.ptr();
+    g_exc_format = exc_format.ptr();
+
+    py::register_exception_translator(&translate_docx_exception);
 }

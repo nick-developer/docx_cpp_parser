@@ -12,3 +12,21 @@ BUILDING.md
 /build_msvc
 /dist
 /out
+
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# The compiled extension is built in place, next to the pure-Python package
+# (see LIBRARY_OUTPUT_DIRECTORY for docx_py_ext in CMakeLists.txt). The .py
+# sources in that directory ARE tracked; only the build output is not.
+/src/docx_comment_parser/*.pyd
+/src/docx_comment_parser/*.so
+/src/docx_comment_parser/*.dll
+/src/docx_comment_parser/*.dylib

@@ -7,7 +7,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "docx-comment-parser"
-version = "1.1.2"
+version = "1.2.0"
 description = "Fast C++ library for extracting comment metadata from .docx files"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -19,6 +19,26 @@ classifiers = [
     "Operating System :: Microsoft :: Windows",
     "Operating System :: MacOS",
 ]
+# The core package has ZERO runtime dependencies — this is the whole point of
+# the library.  Everything optional lives in the extras below.
+dependencies = []
+
+[project.optional-dependencies]
+# DataFrame export back-ends.
+pandas = ["pandas>=2.0"]
+polars = ["polars>=1.0"]
+# The `docx-comments` command-line tool.
+cli    = ["typer>=0.12", "rich>=13.0"]
+# Everything a user could want, in one go.
+all    = ["pandas>=2.0", "polars>=1.0", "typer>=0.12", "rich>=13.0"]
+# Development / CI.
+dev    = ["pytest>=7.0", "pytest-cov>=4.0", "mypy>=1.8",
+          "pandas>=2.0", "polars>=1.0", "typer>=0.12", "rich>=13.0"]
+
+[project.scripts]
+# Always registered, even without the [cli] extra: the entry point prints an
+# actionable install hint when Typer/Rich are missing rather than tracebacking.
+docx-comments = "docx_comment_parser.cli:main"
 
 [tool.scikit-build]
 # Always build in Release mode for distributed wheels.
@@ -30,6 +50,46 @@ cmake.build-type = "Release"
 #     extension; the extension itself compiles all C++ sources in via setup.py)
 cmake.args = ["-DBUILD_TESTS=OFF"]
 
-# The extension module is the only thing that goes into the wheel.
-# No Python source packages to collect.
-wheel.packages = []
+# The pure-Python wrapper package.  CMake installs the compiled extension as
+# docx_comment_parser/_core.<abi>.pyd into the same directory, so the wheel
+# contains one coherent package.
+wheel.packages = ["src/docx_comment_parser"]
+
+# Keep the C++ sources in the sdist so `pip install --no-binary` can rebuild.
+sdist.include = ["src/**", "include/**", "python/**", "vendor/**", "CMakeLists.txt"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/python"]
+python_files = ["test_*.py"]
+markers = [
+    "perf: performance and scale tests (deselect with -m 'not perf')",
+]
+
+[tool.mypy]
+# 3.10 is the oldest version current mypy will type-check against. The package
+# itself still supports 3.9: every module uses `from __future__ import
+# annotations`, and the one 3.10-only feature (dataclass slots) is guarded by an
+# explicit sys.version_info check in models.py.
+python_version = "3.10"
+strict = true
+files = ["src/docx_comment_parser"]
+mypy_path = "src"
+# The compiled extension has no inline types; its shape is declared in
+# _core.pyi, which mypy picks up automatically.
+
+[[tool.mypy.overrides]]
+module = [
+    "pandas.*", "polars.*", "numpy.*",
+    "typer.*", "rich.*", "click.*",
+]
+ignore_missing_imports = true
+# Third-party internals are not ours to type-check, and numpy's stubs require a
+# newer python_version than we target.
+follow_imports = "skip"
+
+[[tool.mypy.overrides]]
+module = ["docx_comment_parser._cli_app"]
+# Typer's @app.command() is Any under follow_imports=skip, which makes strict
+# mode call every decorated command untyped. The command bodies themselves are
+# fully annotated and still checked.
+disallow_untyped_decorators = false
