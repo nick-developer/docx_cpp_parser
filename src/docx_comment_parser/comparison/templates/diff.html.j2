@@ -1,0 +1,243 @@
+{#-
+  Interactive comment diff report.
+
+  Rendered by diff_report.py with autoescape ON: every value interpolated here
+  is escaped unless explicitly marked safe, and the only values marked safe are
+  ones this package generated itself (the inlined CSS/JS and the JSON payload,
+  which is escaped for a <script> context in Python).
+
+  The output is a single self-contained file — no external requests of any kind,
+  so it opens from a USB stick on a machine with no network.
+-#}
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ title }} — comment diff</title>
+<style>{{ css | safe }}</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="head">
+    <div>
+      <h1>{{ title }}</h1>
+      <div class="sub">
+        Comment diff · generated {{ result.generated_at.strftime("%Y-%m-%d %H:%M UTC") }}<br>
+        <code>{{ result.before_name }}</code> → <code>{{ result.after_name }}</code>
+      </div>
+    </div>
+    <button class="theme-toggle" id="theme-toggle" type="button">Light / dark</button>
+  </header>
+
+  {# ── Headline ────────────────────────────────────────────────────────── #}
+  <section>
+    <h2>What changed</h2>
+    <div class="tiles">
+      <div class="tile hero">
+        <div class="label">Net progress</div>
+        <div class="value">{{ "%+d"|format(velocity.net_resolved) }}</div>
+        <div class="note">
+          comments closed · {{ "converging" if velocity.is_converging else "not converging yet" }}
+        </div>
+      </div>
+      <div class="tile">
+        <div class="label">New comments</div>
+        <div class="value">{{ "{:,}".format(velocity.added) }}</div>
+        <div class="note">{{ "{:,}".format(velocity.removed) }} removed</div>
+      </div>
+      <div class="tile">
+        <div class="label">Newly resolved</div>
+        <div class="value">{{ "{:,}".format(velocity.resolved) }}</div>
+        <div class="note">{{ "{:,}".format(velocity.reopened) }} re-opened</div>
+      </div>
+      <div class="tile">
+        <div class="label">Still open</div>
+        <div class="value">{{ "{:,}".format(velocity.open_after) }}</div>
+        <div class="note">was {{ "{:,}".format(velocity.open_before) }}</div>
+      </div>
+      <div class="tile">
+        <div class="label">Resolution rate</div>
+        <div class="value">{{ "%.0f"|format(velocity.resolution_rate_after * 100) }}%</div>
+        <div class="note">{{ "%+.0f"|format(velocity.resolution_rate_delta * 100) }} points</div>
+        <div class="meter"><span style="width: {{ "%.1f"|format(velocity.resolution_rate_after * 100) }}%"></span></div>
+      </div>
+    </div>
+
+    {%- if mix %}
+    <div class="card" style="margin-top: 16px;">
+      {#- One bar, six named segments: the shape of the cycle at a glance. Each
+          segment carries its own label below, so colour is never the only
+          signal for what a band means. -#}
+      <div class="mix" role="img" aria-label="Change mix across {{ "{:,}".format(velocity.comments_before + velocity.added) }} comments">
+        {%- for part in mix %}
+        <i class="mix-{{ part.slug }}" style="width: {{ "%.2f"|format(part.percent) }}%"
+           title="{{ part.label }}: {{ "{:,}".format(part.count) }}"></i>
+        {%- endfor %}
+      </div>
+      <div class="mix-legend">
+        {%- for part in mix %}
+        <span><i class="mix-{{ part.slug }}"></i>{{ part.label }} <b>{{ "{:,}".format(part.count) }}</b></span>
+        {%- endfor %}
+      </div>
+    </div>
+    {%- endif %}
+  </section>
+
+  {# ── Velocity ────────────────────────────────────────────────────────── #}
+  <section>
+    <h2>Review velocity</h2>
+    <div class="card">
+      <table>
+        <thead>
+          <tr><th>Metric</th><th class="num">{{ result.before_name }}</th><th class="num">{{ result.after_name }}</th><th class="num">Change</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Comments</td>
+            <td class="num">{{ "{:,}".format(velocity.comments_before) }}</td>
+            <td class="num">{{ "{:,}".format(velocity.comments_after) }}</td>
+            <td class="num">{{ "%+d"|format(velocity.net_change) }}</td>
+          </tr>
+          <tr>
+            <td>Still open</td>
+            <td class="num">{{ "{:,}".format(velocity.open_before) }}</td>
+            <td class="num">{{ "{:,}".format(velocity.open_after) }}</td>
+            <td class="num">{{ "%+d"|format(velocity.open_after - velocity.open_before) }}</td>
+          </tr>
+          <tr>
+            <td>Resolution rate</td>
+            <td class="num">{{ "%.0f"|format(velocity.resolution_rate_before * 100) }}%</td>
+            <td class="num">{{ "%.0f"|format(velocity.resolution_rate_after * 100) }}%</td>
+            <td class="num">{{ "%+.0f"|format(velocity.resolution_rate_delta * 100) }} pts</td>
+          </tr>
+        </tbody>
+      </table>
+
+      {%- if velocity.median_time_to_resolution or velocity.oldest_open_age %}
+      <table style="margin-top: 18px;">
+        <thead><tr><th>Timing</th><th class="num">Value</th></tr></thead>
+        <tbody>
+          {%- if velocity.median_time_to_resolution %}
+          <tr><td>Age when resolved (median)</td><td class="num">{{ "%.1f"|format(velocity.median_time_to_resolution.total_seconds() / 86400) }} days</td></tr>
+          {%- endif %}
+          {%- if velocity.mean_time_to_resolution %}
+          <tr><td>Age when resolved (mean)</td><td class="num">{{ "%.1f"|format(velocity.mean_time_to_resolution.total_seconds() / 86400) }} days</td></tr>
+          {%- endif %}
+          {%- if velocity.oldest_open_age %}
+          <tr><td>Oldest still-open comment</td><td class="num">{{ "%.1f"|format(velocity.oldest_open_age.total_seconds() / 86400) }} days</td></tr>
+          {%- endif %}
+        </tbody>
+      </table>
+      <p class="caveat">
+        Word records when a comment was written and whether it is now marked done,
+        but never when it was marked done. These ages are measured against the newest
+        comment in the later document, and are therefore a lower bound.
+      </p>
+      {%- endif %}
+    </div>
+  </section>
+
+  {# ── Risk hotspots ───────────────────────────────────────────────────── #}
+  <section>
+    <h2>Risk hotspots</h2>
+    <div class="card">
+      {%- if hotspots %}
+      <table>
+        <thead>
+          <tr>
+            <th class="num">Thread</th>
+            <th>Comment</th>
+            <th>Reviewer</th>
+            <th class="num">Open</th>
+            <th class="num">Size</th>
+            <th class="num">Age</th>
+            <th>Why it is here</th>
+          </tr>
+        </thead>
+        <tbody>
+          {%- for spot in hotspots %}
+          <tr>
+            <td class="num">#{{ spot.root_id }}</td>
+            <td>{{ spot.text }}</td>
+            <td>{{ spot.author or "—" }}</td>
+            <td class="num">{{ spot.open_comments }}</td>
+            <td class="num">{{ spot.size }}</td>
+            <td class="num">{% if spot.age_days is not none %}{{ "%.0f"|format(spot.age_days) }} d{% else %}—{% endif %}</td>
+            <td>
+              {%- if spot.reasons %}
+              {%- for reason in spot.reasons %}<span class="reason">{{ reason }}</span>{% endfor %}
+              {%- else %}<span class="reason">still open</span>{% endif %}
+            </td>
+          </tr>
+          {%- endfor %}
+        </tbody>
+      </table>
+      {%- if hotspot_total > hotspots | length %}
+      <p class="caveat">Showing the {{ hotspots | length }} highest-risk of {{ "{:,}".format(hotspot_total) }} open threads.</p>
+      {%- endif %}
+      {%- else %}
+      <p class="empty-state">Nothing is left open. Every conversation is resolved.</p>
+      {%- endif %}
+    </div>
+  </section>
+
+  {# ── Changes ─────────────────────────────────────────────────────────── #}
+  <section id="changes">
+    <h2>Every change</h2>
+
+    <div class="filters">
+      <input type="search" id="f-search" placeholder="Search comments, anchored text and authors…"
+             aria-label="Search changes">
+      <select id="f-kind" aria-label="Filter by change">
+        <option value="">Any change</option>
+        <option value="added">New comments</option>
+        <option value="removed">Removed</option>
+        <option value="resolved">Newly resolved</option>
+        <option value="reopened">Re-opened</option>
+        <option value="edited">Edited</option>
+        <option value="reanchored">Re-anchored</option>
+        <option value="unchanged">Unchanged</option>
+      </select>
+      <select id="f-author" aria-label="Filter by author">
+        <option value="">All reviewers</option>
+      </select>
+      <button type="button" id="f-reset">Reset</button>
+      <span class="count" id="result-count"></span>
+    </div>
+
+    <div class="chart-head" style="margin-bottom: 12px;">
+      <div class="seg">
+        <button type="button" data-view="cards" aria-pressed="true">Detail</button>
+        <button type="button" data-view="table" aria-pressed="false">Table</button>
+      </div>
+    </div>
+
+    <div class="card" id="results"></div>
+
+    <div class="pager" id="pager" hidden>
+      <button type="button" id="prev">← Previous</button>
+      <span class="page-info" id="page-info"></span>
+      <button type="button" id="next">Next →</button>
+    </div>
+  </section>
+
+  <footer>
+    <span>
+      Generated by docx-comment-parser {{ version }} · self-contained, works offline ·
+      matched
+      {%- for name, count in levels %} {{ count }} by {{ name }}{{ "," if not loop.last }}{% endfor %}
+      at threshold {{ "%.2f"|format(result.threshold) }} ({{ result.similarity_backend }})
+    </span>
+    <span>Print this page to save it as a PDF</span>
+  </footer>
+</div>
+
+{#- The payload is JSON, not JavaScript: a <script type="application/json">
+    block is inert, and the < > & characters were escaped in Python so the
+    document's own text can never close this tag early. -#}
+<script type="application/json" id="diff-data">{{ payload | safe }}</script>
+<script>{{ js | safe }}</script>
+</body>
+</html>

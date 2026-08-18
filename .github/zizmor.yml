@@ -1,0 +1,27 @@
+# zizmor policy for this repository's workflows.
+#
+# See .github/workflows/codeql.yml — the `actions-audit` job runs zizmor and
+# publishes its findings to the Security tab.
+
+rules:
+  unpinned-uses:
+    config:
+      policies:
+        # Third-party actions are pinned by commit. Anything that runs build
+        # code on a runner in the same workflow as the PyPI publish has to be
+        # immune to a moved tag: pypa/cibuildwheel executes the project's own
+        # build in a container it chooses, and pypa/gh-action-pypi-publish holds
+        # a live OIDC token for the project's PyPI account.
+        "pypa/*": hash-pin
+
+        # Actions published by GitHub itself are allowed to be tag-pinned.
+        # These come from the same trust root as the Actions runner executing
+        # them: an attacker who can move `actions/checkout@v4` can already run
+        # whatever they like on the runner, so a commit pin buys nothing here —
+        # while costing a supply of unapplied security fixes whenever Dependabot
+        # falls behind.
+        "actions/*": ref-pin
+        "github/*": ref-pin
+
+        # Anything not named above must be commit-pinned.
+        "*": hash-pin

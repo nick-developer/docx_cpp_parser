@@ -1,0 +1,31 @@
+# Keeps the pinned GitHub Actions current.
+#
+# Commit-pinning a third-party action (see .github/zizmor.yml) trades one risk
+# for another: a moved tag can no longer inject code, but a pinned action stops
+# receiving its own security fixes. Dependabot is the half that makes pinning
+# safe — without it, the pins in python-publish.yml would quietly rot.
+
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # Wait before proposing a freshly published release. The attack this defends
+    # against is a compromised maintainer account publishing a malicious version
+    # — those are typically caught and yanked within days, and an update that
+    # arrives an hour after publication would be merged before anyone noticed.
+    cooldown:
+      default-days: 7
+      semver-major-days: 14
+    # Grouped so a week of routine bumps arrives as one reviewable pull request
+    # rather than six.
+    groups:
+      actions:
+        patterns:
+          - "*"
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "ci"

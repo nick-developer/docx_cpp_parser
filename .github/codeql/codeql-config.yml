@@ -1,0 +1,56 @@
+# CodeQL configuration shared by every language in .github/workflows/codeql.yml.
+#
+# Threat model worth stating, because it decides which alerts matter: this
+# library's entire job is to open files it did not write.  A .docx is a ZIP
+# archive downloaded by email or pulled off a share, parsed by a hand-written
+# ZIP reader, a hand-written DEFLATE decompressor and a hand-written XML parser,
+# all in C++ with no memory safety net.  Every byte the parser touches is
+# attacker-controlled.  On top of that the library *emits* HTML that embeds
+# document content, so the output is a second injection surface.
+#
+# The query suites below are therefore chosen for injection and memory-safety
+# coverage rather than for a quiet dashboard.
+
+name: "docx-comment-parser CodeQL config"
+
+# security-extended adds the deeper, higher-false-positive-rate security
+# queries — the taint-tracking ones that follow attacker data across function
+# boundaries, which is exactly the class of bug that matters here.
+# security-and-quality adds correctness and maintainability on top; drop it from
+# this list if the non-security alerts become noise.
+queries:
+  - uses: security-extended
+  - uses: security-and-quality
+
+# Applies to the languages analysed without a build (python,
+# javascript-typescript, actions).  For c-cpp the analysed set is whatever the
+# manual build in the workflow actually compiles, which is deliberately all four
+# core sources plus the pybind11 bindings and the test suite.
+paths-ignore:
+  # Local build trees. These hold generated and copied sources; analysing them
+  # duplicates every alert against a path nobody edits.
+  - build
+  - build_mingw64
+  - build_msvc
+  - out
+  - dist
+  # Virtualenvs and caches, if a contributor leaves one in the working tree.
+  - "**/.venv"
+  - "**/site-packages"
+  - "**/__pycache__"
+  - .mypy_cache
+  - .pytest_cache
+
+# Deliberately NOT ignored:
+#
+#   vendor/zlib/zlib.h  — normally third-party code would be excluded, but this
+#     one is maintained in-tree: two out-of-bounds/inflate bugs were found and
+#     fixed here in v1.1.0, and it is the first code to touch a hostile archive.
+#     It is the highest-value file in the repository to scan.
+#
+#   src/docx_comment_parser/reporting/assets/*.js and comparison/assets/*.js —
+#     these are inlined into generated HTML reports alongside document text, so
+#     a DOM-XSS finding there is a real vulnerability in a shipped artifact.
+#
+#   tests/ — the C++ test suite builds .docx archives byte by byte, which is
+#     where a bad assumption about the format shows up first.

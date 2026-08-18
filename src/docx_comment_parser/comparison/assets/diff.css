@@ -1,0 +1,190 @@
+/* docx-comment-parser diff report — appended to report.css, never a replacement.
+ *
+ * The review report's tokens, layout, tables and print rules are inherited
+ * wholesale, so the two reports read as one product.  Everything below is
+ * either new to a diff (change colours, before/after blocks, reason chips) or a
+ * small extension of something that already exists.
+ *
+ * Six change kinds need six categorical slots.  Two of them reuse the review
+ * report's series colours on purpose — resolved is the same blue and re-opened
+ * the same orange as "resolved" and "open" are there — so a reader moving
+ * between the two reports does not have to relearn the encoding.  The rest are
+ * chosen for separation against those two and against each other, and are
+ * declared for light and dark in the same three places report.css uses: the
+ * bare :root, the OS media query, and the explicit toggle scope.
+ */
+
+:root {
+  --diff-added: #1f8a4c;
+  --diff-removed: #c0392b;
+  --diff-resolved: var(--series-1);
+  --diff-reopened: var(--series-2);
+  --diff-edited: #7a5cd6;
+  --diff-unchanged: #a9a8a0;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    --diff-added: #35a862;
+    --diff-removed: #e0614f;
+    --diff-edited: #9b82ea;
+    --diff-unchanged: #6b6a64;
+  }
+}
+
+:root[data-theme="dark"] {
+  --diff-added: #35a862;
+  --diff-removed: #e0614f;
+  --diff-edited: #9b82ea;
+  --diff-unchanged: #6b6a64;
+}
+
+/* ── Change mix bar ───────────────────────────────────────────────────────── */
+/* The whole cycle as one 100% bar.  Segments are separated by the surface
+ * colour rather than a stroke, the same rule the timeline chart follows. */
+
+.mix {
+  display: flex;
+  height: 14px;
+  border-radius: 7px;
+  overflow: hidden;
+  background: var(--wash);
+  gap: 2px;
+}
+.mix i { display: block; height: 100%; min-width: 2px; }
+
+.mix-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin-top: 12px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.mix-legend span { display: inline-flex; align-items: center; gap: 7px; }
+.mix-legend i { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+.mix-legend b { font-variant-numeric: tabular-nums; }
+
+.mix-added,    i.mix-added    { background: var(--diff-added); }
+.mix-removed,  i.mix-removed  { background: var(--diff-removed); }
+.mix-resolved, i.mix-resolved { background: var(--diff-resolved); }
+.mix-reopened, i.mix-reopened { background: var(--diff-reopened); }
+.mix-edited,   i.mix-edited   { background: var(--diff-edited); }
+.mix-unchanged,i.mix-unchanged{ background: var(--diff-unchanged); }
+
+/* ── Change tags ──────────────────────────────────────────────────────────── */
+/* A word plus a dot, exactly like the review report's status badges: the word
+ * is the signal and the colour only reinforces it, so the report survives being
+ * printed in greyscale or read by someone who cannot separate the hues. */
+
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  color: var(--text-secondary);
+}
+.tag::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+}
+.tag.added::before { background: var(--diff-added); }
+.tag.removed::before { background: var(--diff-removed); }
+.tag.resolved::before { background: var(--diff-resolved); }
+.tag.reopened::before { background: var(--diff-reopened); }
+.tag.edited::before { background: var(--diff-edited); }
+.tag.reanchored::before { background: var(--diff-edited); }
+.tag.unchanged::before { background: var(--diff-unchanged); }
+
+.tags { display: inline-flex; gap: 12px; flex-wrap: wrap; }
+
+/* ── Reason chips ─────────────────────────────────────────────────────────── */
+
+.reason {
+  display: inline-block;
+  font-size: 12px;
+  padding: 2px 8px;
+  margin: 2px 4px 2px 0;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--wash);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+/* ── Change cards ─────────────────────────────────────────────────────────── */
+
+.change {
+  padding: 14px 4px;
+  border-top: 1px solid var(--border);
+}
+.change:first-child { border-top: 0; }
+
+.change .c-head {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+  color: var(--text-muted);
+  margin-bottom: 7px;
+}
+.change .c-author { font-weight: 600; color: var(--text-secondary); font-size: 13.5px; }
+.change .c-id { font-variant-numeric: tabular-nums; }
+.change .c-score { margin-left: auto; font-variant-numeric: tabular-nums; }
+
+.change .c-text { white-space: pre-wrap; word-wrap: break-word; }
+.change .c-anchor {
+  margin-top: 6px;
+  padding-left: 10px;
+  border-left: 2px solid var(--border);
+  font-size: 13px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+/* Before and after side by side where there is room, stacked where there is
+ * not — a diff read on a phone is still a diff. */
+.sides {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+@media (max-width: 720px) {
+  .sides { grid-template-columns: 1fr; }
+}
+.side {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--wash);
+}
+.side .s-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  margin-bottom: 5px;
+}
+.side.was { border-left: 3px solid var(--diff-removed); }
+.side.now { border-left: 3px solid var(--diff-added); }
+
+.caveat {
+  margin: 14px 0 0;
+  font-size: 12.5px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+@media print {
+  .mix i { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+  .change { break-inside: avoid; }
+}

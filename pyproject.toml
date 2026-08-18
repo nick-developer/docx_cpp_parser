@@ -7,7 +7,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "docx-comment-parser"
-version = "1.3.0"
+version = "1.4.0"
 description = "Fast C++ library for extracting comment metadata from .docx files"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -31,12 +31,17 @@ polars = ["polars>=1.0"]
 cli    = ["typer>=0.12", "rich>=13.0"]
 # Interactive HTML review reports (Markdown reports need no extra).
 report = ["jinja2>=3.0"]
+# Accelerated fuzzy matching for compare_comments(). Optional: without it the
+# diff engine falls back to difflib from the standard library, which produces
+# the same kind of answer more slowly.
+diff   = ["rapidfuzz>=3.0"]
 # Everything a user could want, in one go.
-all    = ["pandas>=2.0", "polars>=1.0", "typer>=0.12", "rich>=13.0", "jinja2>=3.0"]
+all    = ["pandas>=2.0", "polars>=1.0", "typer>=0.12", "rich>=13.0",
+          "jinja2>=3.0", "rapidfuzz>=3.0"]
 # Development / CI.
 dev    = ["pytest>=7.0", "pytest-cov>=4.0", "mypy>=1.8",
           "pandas>=2.0", "polars>=1.0", "typer>=0.12", "rich>=13.0",
-          "jinja2>=3.0"]
+          "jinja2>=3.0", "rapidfuzz>=3.0"]
 
 [project.scripts]
 # Always registered, even without the [cli] extra: the entry point prints an
@@ -102,14 +107,21 @@ mypy_path = "src"
 
 [[tool.mypy.overrides]]
 module = [
-    "pandas.*", "polars.*", "numpy.*",
-    "typer.*", "rich.*", "click.*",
-    "jinja2.*", "markupsafe.*",
+    # Both forms of each name: mypy's "pkg.*" matches a package's submodules
+    # but not the package itself.
+    "pandas", "pandas.*", "polars", "polars.*", "numpy", "numpy.*",
+    "typer", "typer.*", "rich", "rich.*", "click", "click.*",
+    "jinja2", "jinja2.*", "markupsafe", "markupsafe.*",
+    "rapidfuzz", "rapidfuzz.*",
 ]
 ignore_missing_imports = true
 # Third-party internals are not ours to type-check, and numpy's stubs require a
 # newer python_version than we target.
 follow_imports = "skip"
+# rapidfuzz ships .pyi stubs, and follow_imports alone does not apply to stub
+# files — without this mypy walks into rapidfuzz's stubs, then into numpy's,
+# and dies on syntax that only exists from 3.12 onwards.
+follow_imports_for_stubs = true
 
 [[tool.mypy.overrides]]
 module = ["docx_comment_parser._cli_app"]

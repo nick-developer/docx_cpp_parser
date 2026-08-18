@@ -11,3 +11,7 @@ include src/docx_comment_parser/py.typed
 # Report templates and the CSS/JS inlined into generated HTML reports.
 recursive-include src/docx_comment_parser/reporting/templates *.j2
 recursive-include src/docx_comment_parser/reporting/assets *.css *.js
+
+# The same, for the v1.4 diff report.
+recursive-include src/docx_comment_parser/comparison/templates *.j2
+recursive-include src/docx_comment_parser/comparison/assets *.css *.js

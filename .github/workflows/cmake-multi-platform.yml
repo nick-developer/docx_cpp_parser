@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [ "main" ]
 
+# Read-only by default. This workflow only compiles and runs tests; it never
+# writes to the repository.
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ${{ matrix.os }}
@@ -49,6 +54,10 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+      with:
+        # Nothing here pushes; leaving the token in .git/config would only be an
+        # exfiltration target for a compromised build step.
+        persist-credentials: false
 
     # ── Platform dependencies ─────────────────────────────────────────────────
     # Ubuntu: zlib development headers (iconv is part of glibc — no extra pkg).
@@ -59,30 +68,29 @@ jobs:
       run: sudo apt-get update -qq && sudo apt-get install -y zlib1g-dev
 
     # ── Build ─────────────────────────────────────────────────────────────────
-    - name: Set reusable strings
-      id: strings
-      shell: bash
-      run: |
-        echo "build-output-dir=${{ github.workspace }}/build" >> "$GITHUB_OUTPUT"
-
+    # The build directory is a plain relative path rather than a step output.
+    # Every step below runs with the workspace as its working directory, so the
+    # indirection bought nothing — and interpolating a step output into a `run:`
+    # block is the shape of a template-injection sink, which is worth not
+    # teaching by example even when the value itself is trusted.
     - name: Configure CMake
       # BUILD_PYTHON_BINDINGS=OFF: Python wheel building is handled by the
       # separate python-publish workflow; keeping it off avoids pybind11
       # dependency noise in the core C++ CI.
       run: >
-        cmake -B ${{ steps.strings.outputs.build-output-dir }}
+        cmake -B build
         -DCMAKE_CXX_COMPILER=${{ matrix.cpp_compiler }}
         -DCMAKE_C_COMPILER=${{ matrix.c_compiler }}
         -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
         -DBUILD_PYTHON_BINDINGS=OFF
-        -S ${{ github.workspace }}
+        -S .
 
     - name: Build
-      run: cmake --build ${{ steps.strings.outputs.build-output-dir }} --config ${{ matrix.build_type }}
+      run: cmake --build build --config ${{ matrix.build_type }}
 
     # ── Test ──────────────────────────────────────────────────────────────────
     - name: Test
-      working-directory: ${{ steps.strings.outputs.build-output-dir }}
+      working-directory: build
       # --output-on-failure prints the full test output when any test fails,
       # making it straightforward to diagnose encoding or parsing regressions
       # across the three platforms without inspecting runner logs manually.

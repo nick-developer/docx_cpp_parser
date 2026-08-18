@@ -372,3 +372,204 @@ def test_reporting_import_does_not_pull_in_jinja2() -> None:
     )
     assert result.returncode == 0, result.stderr
     assert "clean" in result.stdout
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Comparison (v1.4)
+# ─────────────────────────────────────────────────────────────────────────────
+
+DIFF_SCALE = 5_000
+"""Two review cycles of this size is the shape a real second round takes."""
+
+
+def _revise(specs, resolve_every: int = 3, edit_every: int = 7):
+    """Produce a plausible second round: some resolved, some reworded, some new."""
+    from conftest import CommentSpec
+
+    revised = []
+    for index, spec in enumerate(specs):
+        if index % 11 == 0:
+            continue  # deleted in the second round
+        revised.append(
+            CommentSpec(
+                id=spec.id,
+                author=spec.author,
+                date=spec.date,
+                initials=spec.initials,
+                text=spec.text + (" Reworded." if index % edit_every == 0 else ""),
+                parent=spec.parent,
+                done=spec.done or index % resolve_every == 0,
+                style=spec.style,
+                anchor=spec.anchor,
+            )
+        )
+    revised.extend(
+        CommentSpec(
+            id=900_000 + index,
+            author="New Reviewer",
+            date="2024-04-01T09:00:00Z",
+            text=f"A brand new concern number {index} raised this round.",
+            anchor=f"New anchor {index}.",
+        )
+        for index in range(len(specs) // 20)
+    )
+    return revised
+
+
+@pytest.fixture(scope="module")
+def diff_pair(tmp_path_factory: pytest.TempPathFactory):
+    """Two versions of a 5,000-comment document, already parsed."""
+    import docx_comment_parser as dcp
+
+    directory = tmp_path_factory.mktemp("diff_perf")
+    first = make_specs(DIFF_SCALE, seed=31)
+    second = _revise(first)
+
+    rows = []
+    for name, specs in (("v1.docx", first), ("v2.docx", second)):
+        parser = dcp.DocxParser()
+        parser.parse(str(build_docx(directory / name, specs)))
+        rows.append(parser.to_comments())
+    return rows[0], rows[1]
+
+
+def test_diff_of_5000_comments_is_fast(diff_pair) -> None:
+    """Levels 1 and 2 are dictionary lookups, so a realistic revision never
+    reaches the quadratic level 3 for more than a handful of comments."""
+    from docx_comment_parser.comparison import diff_comments
+
+    before, after = diff_pair
+    result, seconds = measure(lambda: diff_comments(before, after))
+
+    assert result.velocity.comments_before == DIFF_SCALE
+    assert seconds < 20.0, f"diffing {DIFF_SCALE} comments took {seconds:.2f}s"
+
+
+def test_diff_matches_nearly_everything(diff_pair) -> None:
+    """Accuracy, not speed: a revision must not look like a rewrite.
+
+    Every surviving comment keeps its id here, so anything reported as an
+    addition or a removal beyond the ones actually planted is a matching bug.
+    """
+    from docx_comment_parser.comparison import diff_comments
+
+    before, after = diff_pair
+    result = diff_comments(before, after)
+
+    planted_removals = len([1 for index in range(DIFF_SCALE) if index % 11 == 0])
+    assert result.velocity.removed == planted_removals
+    assert result.velocity.added == DIFF_SCALE // 20
+    assert len(result.matched) == DIFF_SCALE - planted_removals
+
+
+def test_diff_scales_near_linearly(tmp_path: Path) -> None:
+    """Ten times the comments must not cost a hundred times the effort."""
+    import docx_comment_parser as dcp
+    from docx_comment_parser.comparison import diff_comments
+
+    def rows(name: str, count: int, seed: int):
+        parser = dcp.DocxParser()
+        parser.parse(str(build_docx(tmp_path / name, make_specs(count, seed=seed))))
+        return parser.to_comments()
+
+    small_a, small_b = rows("sa.docx", 500, 41), rows("sb.docx", 500, 41)
+    big_a, big_b = rows("ba.docx", 5_000, 41), rows("bb.docx", 5_000, 41)
+
+    diff_comments(small_a, small_b)  # warm up
+    _, small_seconds = measure(lambda: diff_comments(small_a, small_b))
+    _, big_seconds = measure(lambda: diff_comments(big_a, big_b))
+
+    ratio = big_seconds / max(small_seconds, 1e-4)
+    assert ratio < 40, f"10x comments cost {ratio:.1f}x the diff time"
+
+
+def test_fuzzy_blocking_keeps_a_full_mismatch_tractable(tmp_path: Path) -> None:
+    """The worst case: two large documents with nothing in common.
+
+    Every comment falls through to level 3, where blocking by shared words is
+    what stops the cross-product from being materialised.
+    """
+    import docx_comment_parser as dcp
+    from conftest import CommentSpec
+    from docx_comment_parser.comparison import diff_comments
+
+    def rows(name: str, offset: int, word: str):
+        specs = [
+            CommentSpec(
+                id=index + offset,
+                author=f"Author {index % 5}",
+                date="2024-03-01T09:00:00Z",
+                # Same sentence shape, no shared number and no shared subject:
+                # the vocabulary overlaps heavily, which is what defeats naive
+                # blocking, while nothing actually corresponds.
+                text=f"{word} observation {index + offset} regarding the manuscript.",
+                anchor=f"{word} passage {index + offset}.",
+            )
+            for index in range(1_500)
+        ]
+        parser = dcp.DocxParser()
+        parser.parse(str(build_docx(tmp_path / name, specs)))
+        return parser.to_comments()
+
+    before = rows("x.docx", 0, "Preliminary")
+    after = rows("y.docx", 500_000, "Subsequent")
+
+    result, seconds = measure(lambda: diff_comments(before, after))
+    assert seconds < 30.0, f"a 1,500 x 1,500 mismatch took {seconds:.2f}s"
+    # Nothing genuinely corresponds, so the honest answer is all-new, all-gone.
+    assert result.velocity.added + result.velocity.removed > 0
+
+
+def test_diff_report_at_scale(diff_pair, tmp_path: Path) -> None:
+    from docx_comment_parser.comparison import diff_comments
+
+    pytest.importorskip("jinja2")
+    before, after = diff_pair
+    result = diff_comments(before, after)
+
+    target = tmp_path / "diff.html"
+    _, seconds = measure(lambda: result.export_html(target))
+    assert seconds < 15.0, f"HTML diff report took {seconds:.2f}s"
+
+    size_mb = target.stat().st_size / (1024 * 1024)
+    assert size_mb < 12, f"diff report is {size_mb:.1f} MB"
+
+
+def test_diff_memory_is_bounded(diff_pair) -> None:
+    """A diff must not hold several extra copies of both documents."""
+    from docx_comment_parser.comparison import diff_comments
+
+    before, after = diff_pair
+    gc.collect()
+    tracemalloc.start()
+    try:
+        diff_comments(before, after)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    peak_mb = peak / (1024 * 1024)
+    assert peak_mb < 200, f"peak memory {peak_mb:.1f} MB for a {DIFF_SCALE}-comment diff"
+
+
+def test_comparison_import_stays_lazy() -> None:
+    """Importing the library must not pull in the diff engine or rapidfuzz.
+
+    The comparison package resolves on first attribute access, the same way the
+    reporting layer does, so a program that only parses pays nothing for it.
+    """
+    import subprocess
+    import sys
+
+    code = (
+        "import sys; import docx_comment_parser;"
+        "assert 'docx_comment_parser.comparison' not in sys.modules, 'comparison imported eagerly';"
+        "assert 'rapidfuzz' not in sys.modules, 'rapidfuzz imported eagerly';"
+        "assert 'difflib' not in sys.modules, 'difflib imported eagerly';"
+        "docx_comment_parser.compare_comments;"
+        "assert 'docx_comment_parser.comparison' in sys.modules, 'lazy attribute did not resolve';"
+        "print('clean')"
+    )
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert "clean" in result.stdout

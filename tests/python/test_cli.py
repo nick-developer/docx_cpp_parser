@@ -37,12 +37,12 @@ def invoke(*args: str):
 def test_help_lists_every_command() -> None:
     result = invoke("--help")
     assert result.exit_code == 0
-    for command in ("parse", "stats", "export", "unresolved", "batch", "report"):
+    for command in ("parse", "stats", "export", "unresolved", "batch", "report", "diff"):
         assert command in result.output
 
 
 @pytest.mark.parametrize(
-    "command", ["parse", "stats", "export", "unresolved", "batch", "report"]
+    "command", ["parse", "stats", "export", "unresolved", "batch", "report", "diff"]
 )
 def test_every_command_has_help(command: str) -> None:
     """Roadmap acceptance criterion: useful help for every command."""
@@ -629,3 +629,171 @@ def test_batch_can_write_a_combined_html_report(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     body = target.read_text(encoding="utf-8")
     assert "Note 0." in body and "Note 1." in body
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  diff (v1.4)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture()
+def cycle_docs(tmp_path: Path) -> tuple[Path, Path]:
+    """Two review rounds: one resolved, one edited, one removed, one added."""
+    before = build_docx(tmp_path / "v1.docx", [
+        CommentSpec(id=0, author="Alice", date="2026-03-01T09:00:00Z",
+                    text="Needs a clearer opening.", anchor="The methodology."),
+        CommentSpec(id=1, author="Bob", date="2026-03-02T09:00:00Z",
+                    text="Agreed.", parent=0),
+        CommentSpec(id=2, author="Carol", date="2026-03-03T09:00:00Z",
+                    text="Legal sign-off needed.", anchor="Clause 4.2."),
+    ])
+    after = build_docx(tmp_path / "v2.docx", [
+        CommentSpec(id=0, author="Alice", date="2026-03-01T09:00:00Z",
+                    text="Needs a clearer opening.", anchor="The methodology.",
+                    done=True),
+        CommentSpec(id=1, author="Bob", date="2026-03-02T09:00:00Z",
+                    text="Agreed, rewritten now.", parent=0),
+        CommentSpec(id=3, author="Dan", date="2026-03-20T09:00:00Z",
+                    text="New security concern.", anchor="Annexe B."),
+    ])
+    return before, after
+
+
+def test_diff_reports_every_bucket(cycle_docs: tuple[Path, Path]) -> None:
+    before, after = cycle_docs
+    result = invoke("diff", str(before), str(after))
+
+    assert result.exit_code == 0, result.output
+    for label in ("New comments", "Removed", "Newly resolved", "Re-opened", "Edited"):
+        assert label in result.output
+
+
+def test_diff_shows_the_changes(cycle_docs: tuple[Path, Path]) -> None:
+    before, after = cycle_docs
+    result = invoke("diff", str(before), str(after))
+
+    assert "New security concern." in result.output
+    assert "Legal sign-off needed." in result.output
+    assert "Agreed, rewritten now." in result.output
+
+
+def test_diff_lists_risk_hotspots(cycle_docs: tuple[Path, Path]) -> None:
+    before, after = cycle_docs
+    result = invoke("diff", str(before), str(after))
+    assert "Risk hotspots" in result.output
+
+
+def test_diff_writes_html(cycle_docs: tuple[Path, Path], tmp_path: Path) -> None:
+    pytest.importorskip("jinja2")
+    before, after = cycle_docs
+    target = tmp_path / "diff.html"
+    result = invoke("diff", str(before), str(after), "-o", str(target))
+
+    assert result.exit_code == 0, result.output
+    assert "<!doctype html>" in target.read_text(encoding="utf-8")
+
+
+def test_diff_writes_markdown_without_any_extra(
+    cycle_docs: tuple[Path, Path], tmp_path: Path
+) -> None:
+    before, after = cycle_docs
+    target = tmp_path / "diff.md"
+    result = invoke("diff", str(before), str(after), "-o", str(target))
+
+    assert result.exit_code == 0, result.output
+    assert target.read_text(encoding="utf-8").startswith("# Comment diff")
+
+
+def test_diff_writes_csv(cycle_docs: tuple[Path, Path], tmp_path: Path) -> None:
+    before, after = cycle_docs
+    target = tmp_path / "diff.csv"
+    invoke("diff", str(before), str(after), "-o", str(target))
+
+    with open(target, newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    assert {row["change"] for row in rows} >= {"added", "removed", "resolved"}
+
+
+def test_diff_writes_json(cycle_docs: tuple[Path, Path], tmp_path: Path) -> None:
+    before, after = cycle_docs
+    target = tmp_path / "diff.json"
+    invoke("diff", str(before), str(after), "-o", str(target))
+
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    assert payload["velocity"]["added"] == 1
+    assert payload["velocity"]["removed"] == 1
+
+
+def test_diff_names_the_documents_the_user_typed(
+    cycle_docs: tuple[Path, Path], tmp_path: Path
+) -> None:
+    before, after = cycle_docs
+    target = tmp_path / "diff.md"
+    invoke("diff", str(before), str(after), "-o", str(target))
+    assert "v1.docx → v2.docx" in target.read_text(encoding="utf-8")
+
+
+def test_diff_threshold_is_passed_through(
+    cycle_docs: tuple[Path, Path], tmp_path: Path
+) -> None:
+    before, after = cycle_docs
+    target = tmp_path / "diff.json"
+    invoke("diff", str(before), str(after), "--threshold", "0.5", "-o", str(target))
+    assert json.loads(target.read_text(encoding="utf-8"))["threshold"] == 0.5
+
+
+def test_diff_rejects_an_out_of_range_threshold(cycle_docs: tuple[Path, Path]) -> None:
+    before, after = cycle_docs
+    assert invoke("diff", str(before), str(after), "--threshold", "1.5").exit_code == 2
+
+
+def test_diff_no_fuzzy_option(cycle_docs: tuple[Path, Path]) -> None:
+    before, after = cycle_docs
+    assert invoke("diff", str(before), str(after), "--no-fuzzy").exit_code == 0
+
+
+def test_diff_show_limits_the_listing(cycle_docs: tuple[Path, Path]) -> None:
+    before, after = cycle_docs
+    result = invoke("diff", str(before), str(after), "--show", "1")
+    assert "use --output for all of them" in result.output
+
+
+def test_diff_show_zero_prints_no_change_table(cycle_docs: tuple[Path, Path]) -> None:
+    before, after = cycle_docs
+    result = invoke("diff", str(before), str(after), "--show", "0")
+    # The summary panel and the hotspot table stay; only the per-change listing
+    # is suppressed.
+    assert "New comments" in result.output
+    assert "Changes" not in result.output
+
+
+def test_diff_of_identical_documents_says_nothing_changed(basic_docx: Path) -> None:
+    result = invoke("diff", str(basic_docx), str(basic_docx))
+    assert result.exit_code == 0
+    assert "Nothing changed" in result.output
+
+
+def test_diff_fail_on_open_gates_a_build(cycle_docs: tuple[Path, Path]) -> None:
+    before, after = cycle_docs
+    assert invoke("diff", str(before), str(after), "--fail-on-open").exit_code == 1
+
+
+def test_diff_fail_on_open_passes_when_everything_is_resolved(tmp_path: Path) -> None:
+    specs = [CommentSpec(id=0, text="All done.", done=True)]
+    both = build_docx(tmp_path / "done.docx", specs)
+    assert invoke("diff", str(both), str(both), "--fail-on-open").exit_code == 0
+
+
+def test_diff_on_an_unreadable_file_exits_one(basic_docx: Path, tmp_path: Path) -> None:
+    broken = tmp_path / "broken.docx"
+    broken.write_bytes(b"not a zip")
+    assert invoke("diff", str(basic_docx), str(broken)).exit_code == 1
+
+
+def test_diff_title_can_be_overridden(
+    cycle_docs: tuple[Path, Path], tmp_path: Path
+) -> None:
+    before, after = cycle_docs
+    target = tmp_path / "diff.md"
+    invoke("diff", str(before), str(after), "--title", "Round two", "-o", str(target))
+    assert target.read_text(encoding="utf-8").startswith("# Comment diff — Round two")

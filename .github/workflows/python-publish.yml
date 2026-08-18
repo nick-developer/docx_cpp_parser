@@ -1,81 +1,160 @@
-# Builds platform wheels for Linux (manylinux), Windows, and macOS, then
-# publishes everything to PyPI via OIDC Trusted Publishing (no API token).
-# Triggered when a GitHub Release is published.
+# Builds platform wheels for Linux (manylinux), Windows and macOS, verifies that
+# every supported Python version actually produced one, then publishes to PyPI
+# via OIDC Trusted Publishing (no API token).
+#
+# Triggered when a GitHub Release is published.  workflow_dispatch runs the same
+# build and verification as a dry run, without publishing — use it to confirm a
+# matrix change before cutting a release.
 
 name: Upload Python Package
 
 on:
   release:
     types: [published]
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+# Never cancel a publish mid-flight; a half-uploaded release is worse than a
+# queued one.
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # ── The contract this workflow enforces ─────────────────────────────────────
+  # pyproject declares requires-python = ">=3.9", so a wheel has to exist for
+  # every released CPython from 3.9 up.  These tags are checked against the
+  # built artifacts in the `verify` job, which fails the release if any are
+  # missing — the failure mode this replaces was silent, because cibuildwheel
+  # simply ignores a CIBW_BUILD selector it does not recognise.
+  #
+  # 3.15 is deliberately absent: it is not final yet.  Add `cp315` here and
+  # `cp315-*` to CIBW_BUILD below on the day it releases.
+  EXPECTED_PYTHON_TAGS: "cp39 cp310 cp311 cp312 cp313 cp314"
 
 jobs:
   # ── Build binary wheels (one runner per platform) ───────────────────────────
   build-wheels:
     name: Build wheels on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
     strategy:
+      # Report every platform independently rather than hiding two failures
+      # behind the first one.
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Nothing here pushes; leaving the token in .git/config would only be
+          # an exfiltration target for a compromised build step.
+          persist-credentials: false
 
       - name: Build wheels
-        uses: pypa/cibuildwheel@v2.22.0
+        # cibuildwheel 4.x is required: CPython 3.14 support arrived in 3.0 and
+        # became a default target in 4.1.  The previously pinned 2.22 predates
+        # it entirely, so `cp314-*` matched no known build identifier and 3.14
+        # wheels were never produced — despite being listed.
+        #
+        # Pinned by commit, not by tag: a tag can be moved, and this action runs
+        # arbitrary build code on a runner in the same workflow as the PyPI
+        # publish. Dependabot bumps it (see .github/dependabot.yml).
+        uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074 # v4.2.0
         env:
-          # CPython 3.9 – 3.14; skip PyPy (not validated with this extension).
-          # Python 3.8 reached EOL October 2024 and is no longer built.
+          # CPython 3.9 – 3.14. PyPy and GraalPy are off by default in 4.x and
+          # are not validated against this extension.
+          #
+          # Free-threaded builds (cp313t / cp314t) are also excluded: these
+          # selectors do not match the `t` identifiers, and the pybind11 module
+          # does not yet declare py::mod_gil_not_used(), so a free-threaded
+          # interpreter would re-enable the GIL on import. Free-threaded users
+          # build from the sdist until that is declared.
           CIBW_BUILD: cp39-* cp310-* cp311-* cp312-* cp313-* cp314-*
 
           # Skip musllinux (Alpine / musl libc) on all architectures.
-          # Two runtime dependencies are unavailable in the default musl images:
-          #   • zlib development headers  (needed at build time)
-          #   • iconv (encoding transcoding) — musl libc does not include iconv;
+          # Two build-time requirements are unavailable in the default musl
+          # images:
+          #   • zlib development headers
+          #   • iconv (encoding transcoding) — musl libc does not include it;
           #     a separate libiconv package would be required.
-          # Re-enable and add a CIBW_BEFORE_BUILD step if musl support is needed.
+          # Re-enable with a CIBW_BEFORE_BUILD step if musl support is needed.
           CIBW_SKIP: "*-musllinux_*"
 
-          # macOS: build both Intel and Apple-Silicon wheels in a single job via
-          # cross-compilation (no separate runner needed for arm64).
+          # Pinned rather than left at the 4.x default of manylinux_2_28.
+          # manylinux2014 is glibc 2.17; manylinux_2_28 is glibc 2.28, which
+          # would drop support for every distro older than RHEL 8 / Debian 10
+          # and push those users onto the sdist (needing a compiler and zlib
+          # headers). That is a user-visible regression from the wheels already
+          # published, so the bump is left as a deliberate future decision.
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux2014
+
+          # macOS: both Intel and Apple Silicon from a single job via
+          # cross-compilation. The runner is arm64, so arm64 is native.
           CIBW_ARCHS_MACOS: x86_64 arm64
 
           # Linux manylinux: x86_64 only.
           # Add aarch64 later via QEMU (CIBW_ARCHS_LINUX: x86_64 aarch64 +
-          # CIBW_BEFORE_ALL_LINUX steps) if an ARM release is needed.
+          # CIBW_BEFORE_ALL_LINUX steps) if an ARM release is needed — and add
+          # it to the verify job's expected platform list at the same time.
           CIBW_ARCHS_LINUX: x86_64
 
           # Windows: 64-bit only.
           CIBW_ARCHS_WINDOWS: AMD64
 
-          # manylinux pre-build: ensure zlib development headers are present.
+          # manylinux pre-build: the images ship zlib-devel, but install it
+          # anyway in case that changes, then *assert* the header is present.
+          # Tolerating the install failure without the assertion would push the
+          # error to a much less obvious place (a CMake find_package failure).
           # iconv is part of glibc in all manylinux images — no extra install.
-          CIBW_BEFORE_BUILD_LINUX: yum install -y zlib-devel || apt-get install -y zlib1g-dev || true
+          CIBW_BEFORE_BUILD_LINUX: >
+            (yum install -y zlib-devel || dnf install -y zlib-devel ||
+             (apt-get update && apt-get install -y zlib1g-dev) || true) &&
+            test -f /usr/include/zlib.h
 
           # macOS pre-build: zlib and iconv are in the Xcode SDK; no extra step.
           # Windows: zlib is vendored (vendor/zlib/zlib.h); iconv uses Win32 API.
+
+          # ── Test every wheel before it is allowed near PyPI ────────────────
+          # This runs against the *installed* wheel in a temp directory outside
+          # the source tree, so it validates the artifact rather than the repo.
+          # Only pytest is installed: the point is to prove the compiled
+          # extension imports and behaves on this interpreter and platform.
+          # Coverage with every optional extra is python-tests.yml's job.
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_COMMAND: >
+            pytest "{project}/tests/python" -m "not perf" -q -p no:cacheprovider
+
+          # The Intel slice is cross-compiled on an arm64 runner and cannot be
+          # executed there.
+          CIBW_TEST_SKIP: "*-macosx_x86_64"
 
       - uses: actions/upload-artifact@v4
         with:
           name: cibw-wheels-${{ matrix.os }}
           path: ./wheelhouse/*.whl
+          if-no-files-found: error
 
-  # ── Build source distribution ────────────────────────────────────────────────
+  # ── Build source distribution ───────────────────────────────────────────────
   build-sdist:
     name: Build source distribution
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.x"
 
       - name: Install build frontend
-        run: python -m pip install build
+        run: python -m pip install --upgrade build
 
       - name: Build sdist
         run: python -m build --sdist
@@ -84,16 +163,79 @@ jobs:
         with:
           name: cibw-sdist
           path: dist/*.tar.gz
+          if-no-files-found: error
 
-  # ── Publish to PyPI via OIDC Trusted Publishing ──────────────────────────────
+  # ── Verify the matrix is complete before anything is published ──────────────
+  # cibuildwheel is happy to build nothing at all for a selector it does not
+  # recognise, and a release that silently omits a Python version is only
+  # discovered by the users who cannot install it. This job turns that into a
+  # build failure.
+  verify:
+    name: Verify artifacts
+    runs-on: ubuntu-latest
+    needs: [build-wheels, build-sdist]
+    timeout-minutes: 10
+
+    steps:
+      # Checkout first: actions/checkout cleans the workspace, so downloading
+      # the artifacts before it would delete them again.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: cibw-*
+          path: dist
+          merge-multiple: true
+
+      - name: Check every expected wheel was built
+        env:
+          # Passed through the environment rather than interpolated into the
+          # script: a `${{ }}` expression expanded inside a run block is a
+          # template-injection sink, and release tag names are attacker-
+          # influenced on a public repository.
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: python .github/scripts/verify_artifacts.py
+        # The script lives in the repo rather than inline so it can be run
+        # locally against a dist/ directory before cutting a release.
+
+      - name: Install the Linux wheel and smoke-test it
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --no-index --find-links dist docx-comment-parser
+          cd "$(mktemp -d)"
+          python - <<'PY'
+          import docx_comment_parser as dcp
+          print("version:", dcp.__version__)
+          parser = dcp.DocxParser()
+          batch = dcp.BatchParser()
+          assert hasattr(parser, "to_dataframe")
+          assert hasattr(parser, "export_html_report")
+          assert dcp.compare_comments is not None
+          print("wheel imports and exposes the v1.4 surface")
+          PY
+
+  # ── Publish to PyPI via OIDC Trusted Publishing ─────────────────────────────
   pypi-publish:
     name: Publish to PyPI
     runs-on: ubuntu-latest
-    needs: [build-wheels, build-sdist]
+    needs: [verify]
+    # workflow_dispatch runs are dry runs: build and verify, never publish.
+    if: github.event_name == 'release'
+    timeout-minutes: 30
 
     permissions:
       # Required for OIDC Trusted Publishing — no API token needed.
       id-token: write
+      # Required to attach PEP 740 provenance attestations to the upload.
+      attestations: write
 
     environment:
       name: pypi
@@ -108,4 +250,13 @@ jobs:
           merge-multiple: true
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        # Pinned by commit rather than the conventional `release/v1` branch:
+        # this is the one step holding a live OIDC token for the project's PyPI
+        # account, so it should not silently follow a moving reference.
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          # Signed provenance tying each artifact to this workflow and commit,
+          # so a consumer can verify the wheel was built here and not uploaded
+          # by someone holding a stolen token.
+          attestations: true
+          print-hash: true

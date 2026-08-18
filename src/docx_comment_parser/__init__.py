@@ -54,7 +54,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     import pandas
     import polars
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 __all__ = [
     # compiled core (unchanged public API)
@@ -75,6 +75,10 @@ __all__ = [
     # reporting layer (new in 1.3)
     "reporting",
     "build_report_data",
+    # comparison layer (new in 1.4)
+    "comparison",
+    "compare_comments",
+    "DiffResult",
     "__version__",
 ]
 
@@ -82,13 +86,23 @@ PathLike = Union[str, "Path"]
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  Lazy access to the reporting layer
+#  Lazy access to the reporting and comparison layers
 # ═════════════════════════════════════════════════════════════════════════════
-# ``dcp.reporting`` and ``dcp.build_report_data`` resolve on first use rather
-# than at import time.  Building the aggregate dataclasses costs a few
+# ``dcp.reporting``, ``dcp.compare_comments`` and friends resolve on first use
+# rather than at import time.  Building the aggregate dataclasses costs a few
 # milliseconds, and a program that only parses documents should not pay it —
 # the same reasoning that keeps pandas out of the import path.  PEP 562 makes
 # this invisible: the attributes behave exactly as if they had been imported.
+
+#: Attribute name → (submodule, attribute in it, or None for the module itself).
+_LAZY: Dict[str, Any] = {
+    "reporting": (".reporting", None),
+    "build_report_data": (".reporting.analytics", "build_report_data"),
+    "comparison": (".comparison", None),
+    "compare_comments": (".comparison.diff_engine", "compare_comments"),
+    "DiffResult": (".comparison.diff_engine", "DiffResult"),
+}
+
 
 def __getattr__(name: str) -> Any:
     # importlib.import_module, not `from . import reporting`: the `from` form
@@ -96,11 +110,13 @@ def __getattr__(name: str) -> Any:
     # lands straight back here and recurses until the stack runs out.
     import importlib
 
-    if name == "reporting":
-        return importlib.import_module(".reporting", __name__)
-    if name == "build_report_data":
-        return importlib.import_module(".reporting.analytics", __name__).build_report_data
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    target = _LAZY.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+    module_name, attribute = target
+    module = importlib.import_module(module_name, __name__)
+    return module if attribute is None else getattr(module, attribute)
 
 
 def __dir__() -> List[str]:

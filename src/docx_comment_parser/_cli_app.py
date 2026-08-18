@@ -9,6 +9,7 @@ the console script still exists and explains itself.
 from __future__ import annotations
 
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, List, Optional, Sequence
 
@@ -20,6 +21,7 @@ from rich.table import Table
 
 from . import __version__
 from ._core import BatchParser, DocxParser, DocxParserError
+from .comparison import DEFAULT_THRESHOLD, ChangeKind, compare_comments
 from .exporters import csv_exporter, json_exporter
 from .filters import filter_comments
 from .models import Comment, build_comments
@@ -62,7 +64,7 @@ def _encoding_supports(sample: str) -> bool:
     return True
 
 
-_UNICODE_OK = _encoding_supports("✓○↳…—✗")
+_UNICODE_OK = _encoding_supports("✓○↳…—✗→")
 
 # NB: ASCII fallbacks must not contain square brackets. Rich would parse "[x]"
 # as a style tag and render nothing at all, silently blanking the column.
@@ -74,6 +76,7 @@ GLYPH_EMPTY = "—" if _UNICODE_OK else "-"
 GLYPH_DASH = "—" if _UNICODE_OK else "-"
 GLYPH_OK = "✓" if _UNICODE_OK else "OK"
 GLYPH_FAIL = "✗" if _UNICODE_OK else "X"
+GLYPH_ARROW = "→" if _UNICODE_OK else "->"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -458,6 +461,191 @@ def report(
         f"[green]{GLYPH_OK}[/] Wrote a report of {len(selected)} comment(s) "
         f"to [bold]{output}[/]"
     )
+
+
+@app.command()
+def diff(
+    before: Path = typer.Argument(
+        ..., exists=True, dir_okay=False, readable=True,
+        help="The earlier .docx — the review you already read.",
+    ),
+    after: Path = typer.Argument(
+        ..., exists=True, dir_okay=False, readable=True,
+        help="The later .docx — the one you want to know about.",
+    ),
+    output: Optional[Path] = typer.Option(
+        None, "--output", "-o",
+        help="Write the full comparison to this .html, .md, .csv or .json file.",
+    ),
+    threshold: float = typer.Option(
+        DEFAULT_THRESHOLD, "--threshold", "-t", min=0.0, max=1.0,
+        help="Similarity a fuzzy match must reach, 0.0-1.0.",
+    ),
+    no_fuzzy: bool = typer.Option(
+        False, "--no-fuzzy",
+        help="Match on ids and anchors only, never on text similarity.",
+    ),
+    title: Optional[str] = typer.Option(
+        None, "--title", help="Heading for the report. Defaults to both file names."
+    ),
+    template: Optional[Path] = typer.Option(
+        None, "--template", exists=True, dir_okay=False,
+        help="Custom Jinja2 template for the HTML report.",
+    ),
+    show: int = typer.Option(
+        10, "--show", "-n", help="Changes listed in the terminal. 0 for none.",
+    ),
+    fail_on_open: bool = typer.Option(
+        False, "--fail-on-open",
+        help="Exit 1 if any comment is still unresolved, for use as a CI gate.",
+    ),
+) -> None:
+    """Compare two review cycles and report what changed.
+
+    Answers the question a second round of review actually raises — what is new,
+    what got closed, and what came back open:
+
+        docx-comments diff spec_v1.docx spec_v2.docx -o changed.html
+    """
+    result = compare_comments(
+        _load(before),
+        _load(after),
+        threshold=threshold,
+        fuzzy=not no_fuzzy,
+    )
+    # _load hands over Comment rows, so the result names itself after the rows'
+    # document_name.  Restore the names the user actually typed.
+    result = replace(result, before_name=before.name, after_name=after.name)
+    velocity = result.velocity
+
+    table = Table.grid(padding=(0, 2))
+    table.add_column(style="bold")
+    table.add_column(justify="right")
+    table.add_column(style="dim")
+    table.add_row("New comments", str(velocity.added), "")
+    table.add_row("Removed", str(velocity.removed), "")
+    table.add_row("Newly resolved", str(velocity.resolved), "")
+    table.add_row("Re-opened", str(velocity.reopened), "")
+    table.add_row("Edited", str(velocity.edited), "")
+    table.add_row("Unchanged", str(velocity.unchanged), "")
+    table.add_row("", "", "")
+    table.add_row(
+        "Comments",
+        f"{velocity.comments_before} {GLYPH_ARROW} {velocity.comments_after}",
+        _delta(velocity.net_change),
+    )
+    table.add_row(
+        "Still open",
+        f"{velocity.open_before} {GLYPH_ARROW} {velocity.open_after}",
+        _delta(velocity.open_after - velocity.open_before),
+    )
+    table.add_row(
+        "Resolution rate",
+        f"{velocity.resolution_rate_before * 100:.0f}% {GLYPH_ARROW} "
+        f"{velocity.resolution_rate_after * 100:.0f}%",
+        f"{velocity.resolution_rate_delta * 100:+.0f} pts",
+    )
+    console.print(
+        Panel(
+            table,
+            title=f"[bold]{before.name} {GLYPH_ARROW} {after.name}[/]",
+            subtitle=(
+                "[green]converging[/]" if velocity.is_converging
+                else "[yellow]not converging yet[/]"
+            ),
+            expand=False,
+        )
+    )
+
+    if show:
+        interesting = [
+            change
+            for change in result.changes
+            if not change.has(ChangeKind.UNCHANGED)
+        ]
+        if interesting:
+            console.print(_change_table(interesting[:show]))
+            if len(interesting) > show:
+                console.print(
+                    f"[dim]Showing {show} of {len(interesting)} changes; "
+                    f"use --output for all of them.[/]"
+                )
+        else:
+            console.print("[green]Nothing changed between these two versions.[/]")
+
+    if result.hotspots:
+        spots = Table(title="Risk hotspots", header_style="bold cyan")
+        spots.add_column("Thread", justify="right", style="dim", no_wrap=True)
+        spots.add_column("Reviewer", style="green", no_wrap=True)
+        spots.add_column("Open", justify="right")
+        spots.add_column("Comment", overflow="fold")
+        spots.add_column("Why", style="dim", overflow="fold")
+        for spot in result.hotspots[:5]:
+            spots.add_row(
+                f"#{spot.root_id}",
+                spot.author or GLYPH_EMPTY,
+                str(spot.open_comments),
+                _truncate(spot.text, 70),
+                ", ".join(spot.reasons) or "still open",
+            )
+        console.print(spots)
+
+    if output is not None:
+        suffix = output.suffix.lower()
+        if suffix == ".csv":
+            result.export_csv(output)
+        elif suffix in {".md", ".markdown"}:
+            result.export_markdown(output, title=title)
+        elif suffix == ".json":
+            result.export_json(output)
+        else:
+            try:
+                result.export_html(output, title=title, template=template)
+            except ImportError as exc:
+                # Jinja2 missing: say how to fix it rather than dumping a traceback.
+                err_console.print(f"[bold red]Error[/] {exc}")
+                raise typer.Exit(code=1)
+        console.print(f"[green]{GLYPH_OK}[/] Wrote the comparison to [bold]{output}[/]")
+
+    if fail_on_open and velocity.open_after:
+        err_console.print(
+            f"[yellow]{velocity.open_after} comment(s) still unresolved "
+            f"in {after.name}.[/]"
+        )
+        raise typer.Exit(code=1)
+
+
+def _delta(value: int) -> str:
+    """A signed change, coloured by whether it is good news."""
+    if value == 0:
+        return ""
+    return f"[{'yellow' if value > 0 else 'green'}]{value:+d}[/]"
+
+
+def _change_table(changes: Sequence[Any]) -> Table:
+    """The per-change listing shown by ``diff``."""
+    table = Table(title="Changes", header_style="bold cyan", expand=True)
+    table.add_column("Change", no_wrap=True)
+    table.add_column("ID", justify="right", style="dim", no_wrap=True)
+    table.add_column("Author", style="green", no_wrap=True)
+    table.add_column("Comment", overflow="fold")
+    table.add_column("Was", style="dim", overflow="fold")
+
+    for change in changes:
+        kinds = ", ".join(kind.value for kind in change.kinds)
+        was = (
+            _truncate(change.before.text, 50)
+            if change.has(ChangeKind.EDITED) and change.before is not None
+            else ""
+        )
+        table.add_row(
+            f"[bold]{kinds}[/]",
+            str(change.comment_id),
+            change.author or GLYPH_EMPTY,
+            _truncate(change.comment.text, 80),
+            was,
+        )
+    return table
 
 
 @app.command()
