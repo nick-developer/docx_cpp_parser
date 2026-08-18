@@ -187,12 +187,24 @@ jobs:
         with:
           python-version: "3.x"
 
+      # The checkout restores anything the repository itself has under dist/.
+      # Two stale 1.1.1 artifacts were committed before /dist was gitignored,
+      # and they landed in the same directory the fresh ones are downloaded
+      # into — which is exactly how a release run failed with
+      # "artifacts disagree on the version: ['1.1.1', '1.4.0']".
+      # Verification must only ever see what this run built.
+      - name: Start from an empty artifact directory
+        run: rm -rf dist
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           pattern: cibw-*
           path: dist
           merge-multiple: true
+
+      - name: List what will be verified and published
+        run: ls -l dist
 
       - name: Check every expected wheel was built
         env:
