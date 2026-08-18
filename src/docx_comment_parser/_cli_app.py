@@ -23,6 +23,7 @@ from ._core import BatchParser, DocxParser, DocxParserError
 from .exporters import csv_exporter, json_exporter
 from .filters import filter_comments
 from .models import Comment, build_comments
+from .reporting import markdown_report, report_builder
 
 app = typer.Typer(
     name="docx-comments",
@@ -389,6 +390,77 @@ def export(
 
 
 @app.command()
+def report(
+    file: Path = typer.Argument(
+        ..., exists=True, dir_okay=False, readable=True,
+        help="Path to the .docx file.",
+    ),
+    output: Optional[Path] = typer.Option(
+        None, "--output", "-o",
+        help="Where to write the report. Defaults to <name>_report.html.",
+    ),
+    as_html: bool = typer.Option(False, "--html", help="Write an HTML report."),
+    as_markdown: bool = typer.Option(
+        False, "--markdown", "--md", help="Write a Markdown report."
+    ),
+    title: Optional[str] = typer.Option(
+        None, "--title", help="Heading for the report. Defaults to the file name."
+    ),
+    template: Optional[Path] = typer.Option(
+        None, "--template", exists=True, dir_okay=False,
+        help="Custom Jinja2 template for the HTML report.",
+    ),
+    author: Optional[str] = AUTHOR_OPT,
+    contains: Optional[str] = CONTAINS_OPT,
+    resolved: bool = RESOLVED_OPT,
+    unresolved_only: bool = UNRESOLVED_OPT,
+    threads_only: bool = THREADS_OPT,
+) -> None:
+    """Build a shareable review report.
+
+    The HTML report is a single self-contained file — charts, search and a
+    thread explorer, no internet needed — so it can simply be emailed:
+
+        docx-comments report spec.docx -o review.html
+    """
+    if as_html and as_markdown:
+        raise typer.BadParameter("Choose either --html or --markdown, not both.")
+
+    # Work out the format first, so the default file name matches it.
+    if not as_html and not as_markdown:
+        suffix = output.suffix.lower() if output is not None else ""
+        as_markdown = suffix in {".md", ".markdown"}
+        as_html = not as_markdown
+    if output is None:
+        output = file.with_name(f"{file.stem}_report{'.md' if as_markdown else '.html'}")
+
+    selected = filter_comments(
+        _load(file),
+        author=author,
+        contains=contains,
+        resolved=_resolved_flag(resolved, unresolved_only),
+        threads_only=threads_only,
+    )
+
+    if as_markdown:
+        markdown_report.export_markdown_report(selected, output, title=title)
+    else:
+        try:
+            report_builder.export_html_report(
+                selected, output, title=title, template=template
+            )
+        except ImportError as exc:
+            # Jinja2 missing: say how to fix it rather than dumping a traceback.
+            err_console.print(f"[bold red]Error[/] {exc}")
+            raise typer.Exit(code=1)
+
+    console.print(
+        f"[green]{GLYPH_OK}[/] Wrote a report of {len(selected)} comment(s) "
+        f"to [bold]{output}[/]"
+    )
+
+
+@app.command()
 def batch(
     directory: Path = typer.Argument(
         ..., exists=True, file_okay=False, readable=True,
@@ -403,7 +475,7 @@ def batch(
     ),
     output: Optional[Path] = typer.Option(
         None, "--output", "-o",
-        help="Write all comments from all files to this .json or .csv file.",
+        help="Combine every file's comments into this .json, .csv, .html or .md file.",
     ),
     author: Optional[str] = AUTHOR_OPT,
     contains: Optional[str] = CONTAINS_OPT,
@@ -484,8 +556,17 @@ def batch(
             resolved=_resolved_flag(resolved, unresolved_only),
             threads_only=threads_only,
         )
-        if output.suffix.lower() == ".csv":
+        suffix = output.suffix.lower()
+        if suffix == ".csv":
             csv_exporter.export_csv(rows, output)
+        elif suffix in {".html", ".htm"}:
+            try:
+                report_builder.export_html_report(rows, output)
+            except ImportError as exc:
+                err_console.print(f"[bold red]Error[/] {exc}")
+                raise typer.Exit(code=1)
+        elif suffix in {".md", ".markdown"}:
+            markdown_report.export_markdown_report(rows, output)
         else:
             json_exporter.export_json(rows, output)
         console.print(

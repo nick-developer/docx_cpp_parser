@@ -126,7 +126,7 @@ ext = Extension(
 
 setup(
     name="docx-comment-parser",
-    version="1.2.0",
+    version="1.3.0",
     author="nick-developer",
     description="Fast C++ library for extracting comment metadata from .docx files",
     long_description=(
@@ -139,13 +139,22 @@ setup(
     # Pure-Python wrapper package (exporters, filters, CLI) lives in src/.
     packages=find_packages(where="src"),
     package_dir={"": "src"},
-    package_data={"docx_comment_parser": ["py.typed", "*.pyi"]},
+    package_data={
+        "docx_comment_parser": ["py.typed", "*.pyi"],
+        # The HTML report inlines these at render time, so they must ship
+        # inside the wheel rather than being generated from source.
+        "docx_comment_parser.reporting": ["templates/*.j2", "assets/*"],
+    },
     python_requires=">=3.9",
     extras_require={
         "pandas": ["pandas>=2.0"],
         "polars": ["polars>=1.0"],
         "cli": ["typer>=0.12", "rich>=13.0"],
-        "all": ["pandas>=2.0", "polars>=1.0", "typer>=0.12", "rich>=13.0"],
+        "report": ["jinja2>=3.0"],
+        "all": [
+            "pandas>=2.0", "polars>=1.0", "typer>=0.12", "rich>=13.0",
+            "jinja2>=3.0",
+        ],
     },
     entry_points={
         "console_scripts": [

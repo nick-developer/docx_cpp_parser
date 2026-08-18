@@ -37,12 +37,12 @@ def invoke(*args: str):
 def test_help_lists_every_command() -> None:
     result = invoke("--help")
     assert result.exit_code == 0
-    for command in ("parse", "stats", "export", "unresolved", "batch"):
+    for command in ("parse", "stats", "export", "unresolved", "batch", "report"):
         assert command in result.output
 
 
 @pytest.mark.parametrize(
-    "command", ["parse", "stats", "export", "unresolved", "batch"]
+    "command", ["parse", "stats", "export", "unresolved", "batch", "report"]
 )
 def test_every_command_has_help(command: str) -> None:
     """Roadmap acceptance criterion: useful help for every command."""
@@ -52,9 +52,13 @@ def test_every_command_has_help(command: str) -> None:
 
 
 def test_version() -> None:
+    import docx_comment_parser
+
     result = invoke("--version")
     assert result.exit_code == 0
-    assert "1.2.0" in result.output
+    # Assert against the package's own version rather than a literal, so a
+    # release bump does not have to be remembered in two places.
+    assert docx_comment_parser.__version__ in result.output
 
 
 def test_no_args_shows_help() -> None:
@@ -522,3 +526,106 @@ def test_entry_point_reports_missing_dependencies(monkeypatch: pytest.MonkeyPatc
     with pytest.raises(SystemExit) as excinfo:
         cli_module.main()
     assert excinfo.value.code == 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  report  (new in v1.3)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture()
+def report_docx(tmp_path: Path) -> Path:
+    specs = [
+        CommentSpec(id=0, author="Alice", text="Check the security model.",
+                    anchor="The system authenticates users."),
+        CommentSpec(id=1, author="Bob", text="Agreed, will revise.", parent=0, done=True),
+        CommentSpec(id=2, author="Carol", text="Typo in the heading."),
+    ]
+    return build_docx(tmp_path / "spec.docx", specs)
+
+
+def test_report_writes_html_by_default(report_docx: Path, tmp_path: Path) -> None:
+    pytest.importorskip("jinja2")
+    target = tmp_path / "review.html"
+    result = invoke("report", str(report_docx), "-o", str(target))
+
+    assert result.exit_code == 0, result.output
+    assert target.exists()
+    body = target.read_text(encoding="utf-8")
+    assert body.startswith("<!doctype html>")
+    assert "Check the security model." in body
+
+
+def test_report_default_filename_is_derived_from_the_document(
+    report_docx: Path,
+) -> None:
+    pytest.importorskip("jinja2")
+    result = invoke("report", str(report_docx))
+
+    assert result.exit_code == 0, result.output
+    assert (report_docx.parent / "spec_report.html").exists()
+
+
+def test_report_infers_markdown_from_the_extension(
+    report_docx: Path, tmp_path: Path
+) -> None:
+    target = tmp_path / "review.md"
+    result = invoke("report", str(report_docx), "-o", str(target))
+
+    assert result.exit_code == 0, result.output
+    assert target.read_text(encoding="utf-8").startswith("# Comment review")
+
+
+def test_report_markdown_flag_needs_no_optional_dependency(
+    report_docx: Path, tmp_path: Path
+) -> None:
+    target = tmp_path / "out.txt"
+    result = invoke("report", str(report_docx), "--markdown", "-o", str(target))
+
+    assert result.exit_code == 0, result.output
+    assert "# Comment review" in target.read_text(encoding="utf-8")
+
+
+def test_report_rejects_both_formats_at_once(report_docx: Path) -> None:
+    result = invoke("report", str(report_docx), "--html", "--markdown")
+    assert result.exit_code == 2
+
+
+def test_report_applies_filters(report_docx: Path, tmp_path: Path) -> None:
+    target = tmp_path / "alice.md"
+    result = invoke("report", str(report_docx), "--author", "alice", "-o", str(target))
+
+    assert result.exit_code == 0, result.output
+    body = target.read_text(encoding="utf-8")
+    assert "| Total comments | 1 |" in body
+    assert "Typo in the heading." not in body
+
+
+def test_report_title_can_be_overridden(report_docx: Path, tmp_path: Path) -> None:
+    target = tmp_path / "t.md"
+    invoke("report", str(report_docx), "--title", "Sprint 4 review", "-o", str(target))
+    assert target.read_text(encoding="utf-8").startswith(
+        "# Comment review — Sprint 4 review"
+    )
+
+
+def test_report_on_an_unreadable_file_exits_one(tmp_path: Path) -> None:
+    broken = tmp_path / "broken.docx"
+    broken.write_bytes(b"not a zip")
+    result = invoke("report", str(broken), "-o", str(tmp_path / "x.md"))
+    assert result.exit_code == 1
+
+
+def test_batch_can_write_a_combined_html_report(tmp_path: Path) -> None:
+    pytest.importorskip("jinja2")
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    for index in range(2):
+        build_docx(folder / f"d{index}.docx", [CommentSpec(id=0, text=f"Note {index}.")])
+
+    target = tmp_path / "all.html"
+    result = invoke("batch", str(folder), "-o", str(target))
+
+    assert result.exit_code == 0, result.output
+    body = target.read_text(encoding="utf-8")
+    assert "Note 0." in body and "Note 1." in body

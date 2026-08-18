@@ -3,6 +3,11 @@ recursive-include vendor *.h *.c
 recursive-include src *.cpp *.h
 recursive-include python *.cpp
 
-# Pure-Python wrapper package (exporters, filters, CLI) and its type markers.
+# Pure-Python wrapper package (exporters, filters, CLI, reporting) and its
+# type markers.
 recursive-include src/docx_comment_parser *.py *.pyi
 include src/docx_comment_parser/py.typed
+
+# Report templates and the CSS/JS inlined into generated HTML reports.
+recursive-include src/docx_comment_parser/reporting/templates *.j2
+recursive-include src/docx_comment_parser/reporting/assets *.css *.js

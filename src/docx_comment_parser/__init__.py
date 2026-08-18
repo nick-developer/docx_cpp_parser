@@ -48,12 +48,13 @@ from .exporters import csv_exporter, dataframe, json_exporter
 from .models import Comment, FIELD_NAMES, build_comments, parse_ooxml_date
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from datetime import datetime
     from pathlib import Path
 
     import pandas
     import polars
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 __all__ = [
     # compiled core (unchanged public API)
@@ -71,10 +72,39 @@ __all__ = [
     "build_comments",
     "parse_ooxml_date",
     "exporters",
+    # reporting layer (new in 1.3)
+    "reporting",
+    "build_report_data",
     "__version__",
 ]
 
 PathLike = Union[str, "Path"]
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  Lazy access to the reporting layer
+# ═════════════════════════════════════════════════════════════════════════════
+# ``dcp.reporting`` and ``dcp.build_report_data`` resolve on first use rather
+# than at import time.  Building the aggregate dataclasses costs a few
+# milliseconds, and a program that only parses documents should not pay it —
+# the same reasoning that keeps pandas out of the import path.  PEP 562 makes
+# this invisible: the attributes behave exactly as if they had been imported.
+
+def __getattr__(name: str) -> Any:
+    # importlib.import_module, not `from . import reporting`: the `from` form
+    # asks the import machinery to getattr the name off this very module, which
+    # lands straight back here and recurses until the stack runs out.
+    import importlib
+
+    if name == "reporting":
+        return importlib.import_module(".reporting", __name__)
+    if name == "build_report_data":
+        return importlib.import_module(".reporting.analytics", __name__).build_report_data
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> List[str]:
+    return sorted(__all__)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -132,6 +162,85 @@ def _parser_export_csv(
     """Write this document's comments to a CSV file. Returns the path written."""
     return csv_exporter.export_csv(
         _parser_to_comments(self), path, encoding=encoding, delimiter=delimiter
+    )
+
+
+def _parser_to_html_report(
+    self: DocxParser,
+    title: Optional[str] = None,
+    generated_at: "Optional[datetime]" = None,
+    template: Optional[PathLike] = None,
+) -> str:
+    """Return this document's review report as an HTML string.
+
+    Requires the ``report`` extra: ``pip install docx-comment-parser[report]``.
+    """
+    from .reporting import report_builder
+
+    return report_builder.render_html_report(
+        _parser_to_comments(self),
+        title=title,
+        generated_at=generated_at,
+        template=template,
+    )
+
+
+def _parser_export_html_report(
+    self: DocxParser,
+    path: PathLike,
+    title: Optional[str] = None,
+    generated_at: "Optional[datetime]" = None,
+    template: Optional[PathLike] = None,
+) -> "Path":
+    """Write a self-contained interactive HTML review report.
+
+    The file has no external references, so it opens offline.  Returns the path
+    written.  Requires the ``report`` extra.
+    """
+    from .reporting import report_builder
+
+    return report_builder.export_html_report(
+        _parser_to_comments(self),
+        path,
+        title=title,
+        generated_at=generated_at,
+        template=template,
+    )
+
+
+def _parser_to_markdown_report(
+    self: DocxParser,
+    title: Optional[str] = None,
+    generated_at: "Optional[datetime]" = None,
+    include_threads: bool = True,
+) -> str:
+    """Return this document's review report as a Markdown string. No extras needed."""
+    from .reporting import markdown_report
+
+    return markdown_report.render_markdown_report(
+        _parser_to_comments(self),
+        title=title,
+        generated_at=generated_at,
+        include_threads=include_threads,
+    )
+
+
+def _parser_export_markdown_report(
+    self: DocxParser,
+    path: PathLike,
+    title: Optional[str] = None,
+    generated_at: "Optional[datetime]" = None,
+    include_threads: bool = True,
+) -> "Path":
+    """Write a Markdown review report. Returns the path written. No extras needed."""
+    from .reporting import markdown_report
+
+    return markdown_report.export_markdown_report(
+        _parser_to_comments(self),
+        path,
+        title=title,
+        generated_at=generated_at,
+        include_threads=include_threads,
     )
 
 
@@ -218,6 +327,86 @@ def _batch_export_csv(
     )
 
 
+def _batch_to_html_report(
+    self: BatchParser,
+    title: Optional[str] = None,
+    generated_at: "Optional[datetime]" = None,
+    template: Optional[PathLike] = None,
+    file_paths: Optional[Iterable[str]] = None,
+) -> str:
+    """Return one HTML review report covering every parsed file."""
+    from .reporting import report_builder
+
+    return report_builder.render_html_report(
+        _batch_to_comments(self, file_paths),
+        title=title,
+        generated_at=generated_at,
+        template=template,
+    )
+
+
+def _batch_export_html_report(
+    self: BatchParser,
+    path: PathLike,
+    title: Optional[str] = None,
+    generated_at: "Optional[datetime]" = None,
+    template: Optional[PathLike] = None,
+    file_paths: Optional[Iterable[str]] = None,
+) -> "Path":
+    """Write one self-contained HTML report covering every parsed file.
+
+    The report's ``Document`` column identifies which file each comment came
+    from.  Requires the ``report`` extra.
+    """
+    from .reporting import report_builder
+
+    return report_builder.export_html_report(
+        _batch_to_comments(self, file_paths),
+        path,
+        title=title,
+        generated_at=generated_at,
+        template=template,
+    )
+
+
+def _batch_to_markdown_report(
+    self: BatchParser,
+    title: Optional[str] = None,
+    generated_at: "Optional[datetime]" = None,
+    include_threads: bool = True,
+    file_paths: Optional[Iterable[str]] = None,
+) -> str:
+    """Return one Markdown review report covering every parsed file."""
+    from .reporting import markdown_report
+
+    return markdown_report.render_markdown_report(
+        _batch_to_comments(self, file_paths),
+        title=title,
+        generated_at=generated_at,
+        include_threads=include_threads,
+    )
+
+
+def _batch_export_markdown_report(
+    self: BatchParser,
+    path: PathLike,
+    title: Optional[str] = None,
+    generated_at: "Optional[datetime]" = None,
+    include_threads: bool = True,
+    file_paths: Optional[Iterable[str]] = None,
+) -> "Path":
+    """Write one Markdown review report covering every parsed file."""
+    from .reporting import markdown_report
+
+    return markdown_report.export_markdown_report(
+        _batch_to_comments(self, file_paths),
+        path,
+        title=title,
+        generated_at=generated_at,
+        include_threads=include_threads,
+    )
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 #  Attach to the compiled classes
 # ═════════════════════════════════════════════════════════════════════════════
@@ -233,6 +422,10 @@ _PARSER_METHODS: Dict[str, Any] = {
     "to_json": _parser_to_json,
     "export_json": _parser_export_json,
     "export_csv": _parser_export_csv,
+    "to_html_report": _parser_to_html_report,
+    "export_html_report": _parser_export_html_report,
+    "to_markdown_report": _parser_to_markdown_report,
+    "export_markdown_report": _parser_export_markdown_report,
 }
 
 _BATCH_METHODS: Dict[str, Any] = {
@@ -243,6 +436,10 @@ _BATCH_METHODS: Dict[str, Any] = {
     "to_json": _batch_to_json,
     "export_json": _batch_export_json,
     "export_csv": _batch_export_csv,
+    "to_html_report": _batch_to_html_report,
+    "export_html_report": _batch_export_html_report,
+    "to_markdown_report": _batch_to_markdown_report,
+    "export_markdown_report": _batch_export_markdown_report,
 }
 
 for _name, _method in _PARSER_METHODS.items():

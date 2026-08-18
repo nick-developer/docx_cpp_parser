@@ -4,8 +4,10 @@ A C++17 shared library that extracts every piece of comment metadata from `.docx
 
 Since v1.2 it also turns those comments into **spreadsheets, DataFrames and JSON**, and ships a **command-line tool** so you can use it without writing any Python.
 
-[![Tests](https://img.shields.io/badge/tests-254%20passing-brightgreen)](#testing)
-[![C++17](https://img.shields.io/badge/C%2B%2B-17-blue)](#building-the-shared-library)
+New in v1.3: turn a document into a **shareable review report** — one self-contained HTML file with charts, search and thread-by-thread reading, that opens with no internet connection.
+
+[![Tests](https://img.shields.io/badge/tests-323%20passing-brightgreen)](#testing)
+[![C++17](https://img.shields.io/badge/C%2B%2B-17-blue)](#building-the-shared-library-with-cmake)
 [![Python ≥ 3.9](https://img.shields.io/badge/python-%E2%89%A53.9-blue)](#quick-start--python)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](#license)
 
@@ -14,20 +16,22 @@ Since v1.2 it also turns those comments into **spreadsheets, DataFrames and JSON
 ## Table of Contents
 
 1. [What it does](#what-it-does)
-2. [What's new in v1.2](#whats-new-in-v12)
-3. [Quick start — Python](#quick-start--python)
-4. [Quick start — command line](#quick-start--command-line)
-5. [Quick start — C++](#quick-start--c)
-6. [Installation](#installation)
-7. [Exporting comments](#exporting-comments)
-8. [Command-line guide](#command-line-guide)
-9. [Python API reference](#python-api-reference)
-10. [C++ API reference](#c-api-reference)
-11. [Architecture](#architecture)
-12. [Performance](#performance)
-13. [Testing](#testing)
-14. [Changelog](#changelog)
-15. [License](#license)
+2. [What's new in v1.3](#whats-new-in-v13)
+3. [What's new in v1.2](#whats-new-in-v12)
+4. [Quick start — Python](#quick-start--python)
+5. [Quick start — command line](#quick-start--command-line)
+6. [Quick start — C++](#quick-start--c)
+7. [Installation](#installation)
+8. [Exporting comments](#exporting-comments)
+9. [Review reports](#review-reports)
+10. [Command-line guide](#command-line-guide)
+11. [Python API reference](#python-api-reference)
+12. [C++ API reference](#c-api-reference)
+13. [Architecture](#architecture)
+14. [Performance](#performance)
+15. [Testing](#testing)
+16. [Changelog](#changelog)
+17. [License](#license)
 
 ---
 
@@ -51,6 +55,42 @@ A `.docx` file is a ZIP archive containing XML parts defined by the OOXML standa
 - Anchoring: `referenced_text` — the exact document text the comment is attached to
 - Threading: `is_reply`, `parent_id`, `replies` list, `thread_ids` chain
 - Resolution: `done` flag from `commentsExtended.xml`
+
+---
+
+## What's new in v1.3
+
+Everything from v1.2 still works exactly as before. v1.3 adds one thing: **you can now hand your review to someone else.**
+
+Until now the library gave you data — rows, JSON, a DataFrame. Useful if you write code. Useless if the person who needs to see the comments is a manager, a client, or a lawyer.
+
+```python
+parser.export_html_report("review.html")
+```
+
+That writes **one HTML file**. Double-click it and you get a page with:
+
+- the headline numbers — how many comments, how many resolved, how many still open, who reviewed
+- a per-reviewer table showing who is keeping up and who is not
+- a chart of comment activity per day and per week
+- every conversation, expandable, in reading order
+- a search box and filters for author, status, keyword and date
+
+**It is one file.** No folder of assets, no web server, no internet. Email it, put it on a USB stick, open it on a plane — it works, because the charts, the styling and the comments are all inside the file itself.
+
+If you prefer text you can paste into a pull request or a ticket:
+
+```python
+parser.export_markdown_report("review.md")
+```
+
+There is a terminal command too:
+
+```bash
+docx-comments report contract.docx -o review.html
+```
+
+**Nothing got heavier.** The base install still has zero dependencies, and importing the library does not load the reporting code at all — you only pay for a report when you ask for one. The parser is untouched and just as fast; see [Performance](#performance).
 
 ---
 
@@ -229,20 +269,24 @@ int main() {
 The base package has **no dependencies at all**. Optional features live behind extras, so you only install what you use:
 
 ```bash
-pip install docx-comment-parser              # parser + CSV/JSON export. Zero dependencies.
+pip install docx-comment-parser              # parser + CSV/JSON/Markdown. Zero dependencies.
 pip install "docx-comment-parser[pandas]"    # + to_dataframe()
 pip install "docx-comment-parser[polars]"    # + to_polars()
 pip install "docx-comment-parser[cli]"       # + the docx-comments command
+pip install "docx-comment-parser[report]"    # + export_html_report()
 pip install "docx-comment-parser[all]"       # everything above
 ```
 
 | Extra | Adds | Gives you |
 |---|---|---|
-| *(none)* | — | `DocxParser`, `BatchParser`, `export_csv()`, `export_json()`, `to_dict()`, `to_json()` |
+| *(none)* | — | `DocxParser`, `BatchParser`, `export_csv()`, `export_json()`, `to_dict()`, `to_json()`, `export_markdown_report()` |
 | `pandas` | pandas ≥ 2.0 | `to_dataframe()` |
 | `polars` | polars ≥ 1.0 | `to_polars()` |
 | `cli` | typer, rich | the `docx-comments` terminal command |
+| `report` | jinja2 ≥ 3.0 | `export_html_report()` |
 | `all` | all of the above | everything |
+
+The **Markdown** report deliberately needs no extra, exactly like CSV and JSON. Only the interactive HTML report needs `[report]`.
 
 If you call a method whose extra is missing, you get a message telling you exactly what to install rather than an obscure `ImportError`:
 
@@ -481,6 +525,167 @@ parser.export_csv("comments.csv", delimiter=";")   # for locales where Excel exp
 
 ---
 
+## Review reports
+
+Exports give you **data**. Reports give you something a person can read.
+
+### The one-liner
+
+```python
+import docx_comment_parser as dcp
+
+parser = dcp.DocxParser()
+parser.parse("contract.docx")
+
+parser.export_html_report("review.html")      # needs [report]
+parser.export_markdown_report("review.md")    # needs nothing
+```
+
+Both return the path they wrote and create missing folders for you.
+
+### What the HTML report contains
+
+Open `review.html` in any browser and you get five things, top to bottom:
+
+| Section | What it answers |
+|---|---|
+| **Overview** | How many comments are there, how many are resolved, how many are still open, how many people reviewed, and over what period |
+| **Reviewers** | Who wrote how many comments, and what share of each person's comments got resolved |
+| **Timeline** | When the reviewing actually happened — a bar per day, or per week |
+| **Comments → Threads** | Every conversation, collapsed to one line, expandable to read the whole exchange |
+| **Comments → Table** | The same comments as flat rows, when you want to scan rather than read |
+
+Above the comments is a filter bar. Type in the search box and the page filters as you type, matching the comment text, the document text it points at, and the author name. The dropdowns filter by reviewer and by status; the two date boxes narrow to a period. They combine, so "everything Alice left open in March" is three clicks.
+
+Every chart bar shows exact numbers when you hover it, and under each chart there is a **Show the numbers behind this chart** link that reveals the same data as a plain table — useful for copying figures out, and for anyone who cannot read the chart.
+
+There is a light/dark button in the top right, and the page follows your system setting until you touch it.
+
+### Why it is one file
+
+The report has **no external references at all**. The styling, the interactive code, the charts and the comments are all written inside the `.html` file.
+
+That matters more than it sounds:
+
+- it opens with no internet connection
+- it still works in five years, when whatever CDN it might have used is gone
+- it survives being emailed as an attachment
+- nothing is sent anywhere when someone opens it — there is no server involved, so a confidential document stays confidential
+
+The charts are plain SVG drawn when the file is written, not a JavaScript charting library. That is why a 5,000-comment report is under a megabyte and appears instantly instead of animating into place.
+
+**Want a PDF?** Open the report and print it (`Ctrl+P` → *Save as PDF*). The page has a print stylesheet that hides the buttons and filters, expands every thread, and keeps sections from splitting across pages. That is why this package does not depend on a PDF library — the browser already does it well.
+
+### Reporting on part of a document
+
+Reports take a list of comments, so anything you can filter, you can report on:
+
+```python
+from docx_comment_parser.filters import filter_comments
+from docx_comment_parser.reporting import export_html_report
+
+still_open = filter_comments(parser.to_comments(), resolved=False)
+export_html_report(still_open, "open_items.html", title="Outstanding issues")
+```
+
+`title` replaces the heading; it defaults to the document's file name.
+
+### Several documents in one report
+
+`BatchParser` reports on everything it parsed, and the report gains a **Document** column so you can tell the files apart:
+
+```python
+import glob
+
+batch = dcp.BatchParser(max_threads=0)
+batch.parse_all(glob.glob("reviews/*.docx"))
+
+batch.export_html_report("all_reviews.html", title="Q1 review round")
+```
+
+### The Markdown report
+
+Same numbers, plain text, no extras required. It is built to be pasted somewhere:
+
+```python
+print(parser.to_markdown_report())
+```
+
+```markdown
+# Comment review — contract.docx
+
+## Overview
+
+| Metric | Value |
+| --- | --- |
+| Total comments | 42 |
+| Resolved | 31 (74%) |
+| Still open | 11 |
+| Reviewers | 4 |
+
+## Open items (11)
+
+- **[#3] Alice** (2026-01-15): Clause 4.2 needs legal sign-off.
+  - 2 replies, 1 still open
+```
+
+It leads with **Open items** — the things somebody still has to do — because that is what a reviewer opens the file for. A full transcript of every conversation follows; pass `include_threads=False` for just the summary.
+
+```python
+parser.export_markdown_report("digest.md", include_threads=False)
+```
+
+Because it is ordinary Markdown, it renders as-is in a GitHub pull request, a Jira ticket, or a Confluence page — and it is a good format to hand to an LLM.
+
+### Just the numbers
+
+If you want the statistics without any rendering, the analytics layer is public and needs nothing installed:
+
+```python
+from docx_comment_parser import build_report_data
+
+data = build_report_data(parser.to_comments())
+
+print(data.overview.unresolved, "still open")
+print(data.overview.resolution_rate)              # 0.0 – 1.0
+
+for author in data.authors:                       # busiest reviewer first
+    print(author.author, author.total, f"{author.resolution_percent:.0f}%")
+
+for bucket in data.weekly:
+    print(bucket.label, bucket.total, bucket.resolved)
+
+for thread in data.threads:
+    print(thread.root.text, "-", thread.size, "comments")
+```
+
+A `thread` is counted as resolved only when **every** comment in it is resolved — one open reply keeps the whole conversation open, which is how a person reads it.
+
+### Using your own template
+
+If you want the report to match a house style, pass your own Jinja2 template:
+
+```python
+parser.export_html_report("review.html", template="my_template.html.j2")
+```
+
+It receives `data` (everything above), plus `payload`, `css`, `js`, `daily_chart`, `weekly_chart`, `default_scale` and `version`. Your template's own folder is searched first, so you can `{% extends "report.html.j2" %}` and override just one block.
+
+### Reproducible output
+
+Reports stamp the time they were generated, so two runs differ. Pass a fixed timestamp and the output is byte-for-byte identical — handy for checking a report into version control and diffing it:
+
+```python
+from datetime import datetime, timezone
+
+parser.export_html_report(
+    "review.html",
+    generated_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+)
+```
+
+---
+
 ## Command-line guide
 
 Install with `pip install "docx-comment-parser[cli]"`, then run `docx-comments --help`. Every command has its own `--help` too.
@@ -550,15 +755,45 @@ If you give `-o` a filename, the format is inferred from the extension, so `--cs
 docx-comments export report.docx -o comments.csv     # CSV, inferred
 ```
 
+### `report` — a shareable review report
+
+```bash
+docx-comments report contract.docx                       # writes contract_report.html
+docx-comments report contract.docx -o review.html
+docx-comments report contract.docx -o review.md          # Markdown, inferred
+docx-comments report contract.docx --markdown            # Markdown, explicit
+```
+
+With no `-o` it writes `<name>_report.html` next to the document. The format follows the extension you give, so `--html` / `--markdown` are usually unnecessary.
+
+Filters work here too, which is how you produce a report of just the open items:
+
+```bash
+docx-comments report spec.docx --unresolved -o todo.html
+docx-comments report spec.docx --author alice --title "Alice's notes" -o alice.html
+```
+
+| Flag | Meaning |
+|---|---|
+| `--output PATH`, `-o` | Where to write it. Defaults to `<name>_report.html` |
+| `--html` / `--markdown` | Force the format instead of inferring it from the extension |
+| `--title TEXT` | Heading for the report. Defaults to the file name |
+| `--template PATH` | Your own Jinja2 template for the HTML report |
+
+The HTML report needs the `[report]` extra. Without it the command prints the one-line install instruction and exits `1` rather than showing a traceback. Markdown always works.
+
 ### `batch` — a whole folder
 
 ```bash
 docx-comments batch ./reviews
 docx-comments batch ./reviews --recursive --threads 8
 docx-comments batch ./reviews -o all_comments.csv
+docx-comments batch ./reviews -o all_reviews.html      # one report for every file
 ```
 
 Prints one row per file, then a total. Word's `~$name.docx` lock files are ignored. Unreadable files are listed at the end and the command exits `1`, but every readable file is still processed and exported.
+
+`-o` accepts `.csv`, `.json`, `.html` and `.md`, and picks the writer from the extension.
 
 ### Filters
 
@@ -705,6 +940,25 @@ parser.parse("report.docx")
 parser.to_dataframe()                 # a table
 parser.export_csv("comments.csv")     # a spreadsheet
 ```
+
+#### Report methods
+
+Added in v1.3. See [Review reports](#review-reports) for what the reports contain.
+
+| Method | Returns | Needs |
+|---|---|---|
+| `export_html_report(path, title=None, generated_at=None, template=None)` | `Path` written | `[report]` extra |
+| `to_html_report(...)` | `str` | `[report]` extra |
+| `export_markdown_report(path, title=None, generated_at=None, include_threads=True)` | `Path` written | — |
+| `to_markdown_report(...)` | `str` | — |
+
+```python
+parser.parse("contract.docx")
+parser.export_html_report("review.html")       # one shareable file
+parser.export_markdown_report("review.md")     # text to paste anywhere
+```
+
+`BatchParser` has the same four methods. They combine every parsed file into one report and take an extra optional `file_paths` argument to restrict it.
 
 ---
 
@@ -1030,6 +1284,18 @@ docx_comment_parser/
 │       └── zlib.h              ← vendored DEFLATE + CRC-32 (used on MSVC only)
 ├── python/
 │   └── python_bindings.cpp     ← pybind11 module (GIL released during batch)
+├── src/docx_comment_parser/    ← pure-Python layer
+│   ├── models.py               ← Comment dataclass (flat, tabular projection)
+│   ├── exporters/              ← CSV, JSON, pandas, polars
+│   ├── filters.py              ← shared filter predicates
+│   ├── reporting/              ← v1.3 review reports
+│   │   ├── analytics.py        ← aggregates shared by every report format
+│   │   ├── charts.py           ← inline SVG columns, no chart library
+│   │   ├── report_builder.py   ← Jinja2 → one self-contained HTML file
+│   │   ├── markdown_report.py  ← stdlib-only Markdown digest
+│   │   ├── templates/          ← report.html.j2
+│   │   └── assets/             ← report.css, report.js (inlined at render time)
+│   └── _cli_app.py             ← Typer + Rich command line
 ├── tests/
 │   ├── CMakeLists.txt
 │   └── test_docx_parser.cpp    ← 38 assertions, builds its own .docx in memory
@@ -1079,7 +1345,42 @@ ZipReader — memory-mapped — inflate one entry at a time
 
 ## Performance
 
-Parsing speed is the point of this library, so v1.2 was measured against v1.1.2 to confirm the restructure cost nothing.
+Parsing speed is the point of this library, so every release is measured against the last one to confirm the new features cost nothing.
+
+### Parser throughput — v1.2.0 vs v1.3.0
+
+Runs interleaved A/B/A/B so background load hits both versions equally; each figure is the best of three rounds of seven.
+
+| Comments | v1.2.0 | v1.3.0 | Change |
+|---|---|---|---|
+| 100 | 1.346 ms | 1.352 ms | +0.4% |
+| 1,000 | 13.647 ms | 13.608 ms | −0.3% |
+| 10,000 | 136.412 ms | 144.988 ms | +6.3% |
+
+Every figure here is noise, including the last one — and that can be shown rather than assumed. Both columns ran **the same compiled `_core` extension**: v1.3 changed no C++ at all. `parse()` is therefore byte-identical machine code in both runs, so its measured spread is by definition this machine's measurement error, which puts the noise floor at roughly ±6%. Nothing in the table exceeds it.
+
+### Import cost
+
+v1.3 adds a reporting layer, but importing the library does not load it:
+
+| | v1.2.0 | v1.3.0 |
+|---|---|---|
+| `import docx_comment_parser` | 57.6 ms | 57.1 ms |
+
+The reporting modules resolve on first use, the same way pandas already did. A program that only parses documents never pays for code it does not call — `import docx_comment_parser; "reporting" in sys.modules` is `False`, and a test asserts it stays that way.
+
+### Report generation
+
+| Comments | `parse()` | analytics | `export_html_report()` | `export_markdown_report()` | HTML size |
+|---|---|---|---|---|---|
+| 100 | 1.2 ms | 0.5 ms | 19.2 ms | 2.4 ms | 68 KB |
+| 1,000 | 12.0 ms | 3.8 ms | 38.8 ms | 20.1 ms | 206 KB |
+| 5,000 | 58.2 ms | 20.0 ms | 140.4 ms | 77.8 ms | 835 KB |
+| 10,000 | 122.7 ms | 38.7 ms | 264.3 ms | 155.9 ms | 1.6 MB |
+
+Report figures are end-to-end from a parsed document to a finished file. About 17 ms of the HTML column is fixed start-up cost (reading the template and starting Jinja2) which is why the small cases look disproportionate; beyond that, cost grows with the number of comments rather than faster.
+
+A 5,000-comment report — the roadmap's stated target — takes **140 ms** and produces an **835 KB** file that still opens instantly. Two decisions keep it that size: comments are embedded once as compact JSON with author and document names de-duplicated, rather than as pre-rendered rows; and the charts are generated SVG rather than a ~200 KB bundled chart library. The page then renders one screen of results at a time, so the browser never lays out thousands of rows.
 
 ### Parser throughput — v1.1.2 vs v1.2.0
 
@@ -1115,7 +1416,7 @@ These properties are asserted by the test suite, not just measured once — see 
 
 ## Testing
 
-There are two suites: the original C++ one and a Python one added in v1.2. Together they run **254 checks**.
+There are two suites: the original C++ one and a Python one added in v1.2. Together they run **323 checks**.
 
 ### Python suite
 
@@ -1126,7 +1427,7 @@ pytest -m "not perf"            # skip the slower performance tests
 pytest --cov=docx_comment_parser --cov-report=term-missing
 ```
 
-188 tests, **97% statement coverage** — above the 90% project target.
+257 tests, **98% statement coverage** — above the 90% project target.
 
 Like the C++ suite, it invents its own fixtures: `tests/python/conftest.py` builds genuine `.docx` packages with `zipfile` and hands them to the real parser. Nothing is mocked, and no sample documents need to exist on disk.
 
@@ -1137,7 +1438,14 @@ Like the C++ suite, it invents its own fixtures: `tests/python/conftest.py` buil
 | `test_exporters.py` | pandas, polars, JSON and CSV output, including dtypes, Unicode and empty documents |
 | `test_filters.py` | Filtering rules |
 | `test_cli.py` | Every command, flag, and exit code, through Typer's test runner |
+| `test_reporting.py` | Analytics arithmetic, SVG charts, HTML and Markdown output, and the security properties below |
 | `test_performance.py` | Scale and timing budgets (marked `perf`) |
+
+Three of the reporting tests are worth calling out, because they check promises rather than behaviour:
+
+- **It really is self-contained.** The generated HTML is scanned for any `src`/`href` pointing outside the file; the assertion is that there are none. It runs against both a 3-comment document and a 5,000-comment one.
+- **Document content cannot break the page.** A comment whose text is `</script><script>…` is written into a report, and the test asserts the file still contains exactly the two script tags the template opened — the comment's own text is escaped into inert JSON, and survives intact when decoded.
+- **The library stays lazy.** A subprocess imports the package and asserts that neither the reporting layer nor pandas appears in `sys.modules`.
 
 The regression file is the important one: it exists specifically to prove that moving the compiled module into a package changed nothing a user can see. If it passes, upgrading is safe.
 
@@ -1207,6 +1515,50 @@ The test binary exits with code `0` on full pass, `1` on any failure.
 ---
 
 ## Changelog
+
+### v1.3.0 — Shareable review reports
+
+**Public API: backward compatible.** Existing code needs no changes; `test_core_regression.py` proves it, and the parser's C++ sources were not touched at all.
+
+#### New — `export_html_report()`
+
+- One self-contained HTML file: overview tiles, a per-reviewer table, per-day and per-week activity charts, an expandable thread explorer, and a filterable comment table.
+- Client-side search and filters (author, status, keyword, date range) with no backend.
+- **No external references of any kind** — it opens offline, and opening it sends nothing anywhere. Asserted by a test, at 3 comments and at 5,000.
+- Charts are generated inline SVG rather than a bundled charting library, which keeps a 5,000-comment report at 835 KB instead of megabytes and makes it render instantly.
+- A print stylesheet, so the browser's *Save as PDF* produces a clean document — which is why there is no PDF dependency.
+- Custom Jinja2 templates via `template=`, receiving the same context as the built-in one.
+- Available on `DocxParser` and `BatchParser`; the batch version merges every parsed file and adds a `Document` column.
+
+#### New — `export_markdown_report()`
+
+Same figures, plain text, **no extra required** — like CSV and JSON. Leads with open items, then the full transcript (`include_threads=False` for a summary only). Pastes into a pull request, a ticket, or an LLM prompt.
+
+#### New — a public analytics layer
+
+`build_report_data()` returns the aggregates both report formats share — `Overview`, `AuthorStat`, `TimelineBucket` and `Thread` — as plain frozen dataclasses, with no rendering and no dependencies. This is what stops the two formats from ever disagreeing about how many comments are open, and it is useful on its own.
+
+A thread counts as resolved only when every comment in it is resolved: one open reply keeps the conversation open.
+
+#### New — the `report` command
+
+```bash
+docx-comments report contract.docx -o review.html
+docx-comments report spec.docx --unresolved -o todo.html
+```
+
+Format inferred from the extension, all the usual filters, plus `--title` and `--template`. `batch -o` now also accepts `.html` and `.md`.
+
+#### Performance — no regression, and no new import cost
+
+- Parser throughput unchanged: v1.3 ships the same compiled extension, so the A/B spread *is* the measurement noise floor (see [Performance](#performance)).
+- The reporting layer is imported on first use, not at `import docx_comment_parser`. Import time is unchanged at ~57 ms, and a test asserts the modules stay out of `sys.modules`.
+
+#### Packaging
+
+- New `report` extra (`jinja2>=3.0`), added to `all` and `dev`. The base install still has **zero dependencies**.
+- Templates and assets ship in the wheel and the sdist.
+- 257 Python tests at 98% coverage, alongside the 66 C++ checks; `mypy --strict` still passes.
 
 ### v1.2.0 — Structured export and a command-line tool
 

@@ -1,0 +1,432 @@
+/* docx-comment-parser review report — inlined into every generated file.
+ *
+ * Light is the base palette; dark is a *selected* set of steps for the dark
+ * surface, not an automatic inversion.  Both are declared twice on purpose:
+ * the media query follows the operating system, the [data-theme] scope follows
+ * the report's own toggle, and the toggle has to win in both directions.
+ */
+
+:root {
+  color-scheme: light;
+
+  --plane: #f9f9f7;
+  --surface: #fcfcfb;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #898781;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --border: rgba(11, 11, 11, 0.10);
+  --wash: rgba(11, 11, 11, 0.04);
+
+  /* Chart marks. Categorical slots 1 and 2: worst-pair colour-vision
+   * separation ΔE 24.7 light / 26.8 dark, against a floor of 8. */
+  --series-1: #2a78d6;  /* Resolved */
+  --series-2: #eb6834;  /* Open */
+
+  /* Status palette — reserved for badges, never used as a chart mark.
+   * Each badge ships an icon and a word, so colour is never the only signal. */
+  --status-good: #0ca30c;
+  --status-open: #b06a00;
+
+  --radius: 10px;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --plane: #0d0d0d;
+    --surface: #1a1a19;
+    --text-primary: #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted: #898781;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --border: rgba(255, 255, 255, 0.10);
+    --wash: rgba(255, 255, 255, 0.05);
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --status-good: #0ca30c;
+    --status-open: #fab219;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --plane: #0d0d0d;
+  --surface: #1a1a19;
+  --text-primary: #ffffff;
+  --text-secondary: #c3c2b7;
+  --text-muted: #898781;
+  --grid: #2c2c2a;
+  --axis: #383835;
+  --border: rgba(255, 255, 255, 0.10);
+  --wash: rgba(255, 255, 255, 0.05);
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --status-good: #0ca30c;
+  --status-open: #fab219;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 32px 20px 64px;
+  background: var(--plane);
+  color: var(--text-primary);
+  font-family: var(--font);
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+.wrap { max-width: 1180px; margin: 0 auto; }
+
+/* ── Header ───────────────────────────────────────────────────────────────── */
+
+.head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 28px;
+}
+.head h1 { margin: 0 0 4px; font-size: 26px; font-weight: 600; letter-spacing: -0.01em; }
+.head .sub { color: var(--text-secondary); font-size: 14px; }
+.head .sub code {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  word-break: break-all;
+}
+
+.theme-toggle {
+  flex: none;
+  background: var(--surface);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 13px;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.theme-toggle:hover { background: var(--wash); color: var(--text-primary); }
+
+/* ── Sections ─────────────────────────────────────────────────────────────── */
+
+section { margin-bottom: 34px; }
+
+h2 {
+  margin: 0 0 14px;
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-muted);
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+}
+
+/* ── Stat tiles ───────────────────────────────────────────────────────────── */
+
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+}
+.tile {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+}
+.tile .label {
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+/* Proportional figures: tabular-nums makes a standalone number look loose. */
+.tile .value { font-size: 30px; font-weight: 600; letter-spacing: -0.02em; }
+.tile .note { font-size: 12px; color: var(--text-muted); margin-top: 3px; }
+
+/* The one hero figure on the page. */
+.tile.hero .value { font-size: 48px; }
+
+/* ── Meter (resolution progress) ──────────────────────────────────────────── */
+
+.meter {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--wash);
+  overflow: hidden;
+  margin-top: 10px;
+}
+.meter > span {
+  display: block;
+  height: 100%;
+  background: var(--series-1);
+  border-radius: 999px;
+}
+
+/* ── Charts ───────────────────────────────────────────────────────────────── */
+
+.chart-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+
+.legend { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+.legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  color: var(--text-secondary); /* text keeps an ink token; the dot carries identity */
+}
+.legend i {
+  width: 11px;
+  height: 11px;
+  border-radius: 3px;
+  flex: none;
+}
+.legend .k1 { background: var(--series-1); }
+.legend .k2 { background: var(--series-2); }
+
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.seg button {
+  background: transparent;
+  border: 0;
+  padding: 6px 14px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.seg button + button { border-left: 1px solid var(--border); }
+.seg button[aria-pressed="true"] { background: var(--wash); color: var(--text-primary); font-weight: 600; }
+
+.viz { width: 100%; height: auto; display: block; overflow: visible; }
+.viz-grid { stroke: var(--grid); stroke-width: 1; }
+.viz-axis { stroke: var(--axis); stroke-width: 1; }
+.viz-tick { fill: var(--text-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.viz-peak { fill: var(--text-secondary); font-size: 11px; font-weight: 600; }
+.viz-series-1 { fill: var(--series-1); }
+.viz-series-2 { fill: var(--series-2); }
+.viz-hit { fill: transparent; }
+.viz-col:hover .viz-hit { fill: var(--wash); }
+.viz-empty { color: var(--text-muted); font-size: 14px; margin: 24px 0; text-align: center; }
+
+.tooltip {
+  position: fixed;
+  z-index: 40;
+  pointer-events: none;
+  background: var(--surface);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 11px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.16);
+  opacity: 0;
+  transition: opacity 0.09s;
+}
+.tooltip[data-show="1"] { opacity: 1; }
+.tooltip b { font-weight: 600; }
+.tooltip .row { display: flex; align-items: center; gap: 7px; }
+.tooltip i { width: 9px; height: 9px; border-radius: 2px; flex: none; }
+
+details.data-view { margin-top: 12px; }
+details.data-view summary {
+  cursor: pointer;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+details.data-view table { margin-top: 10px; }
+
+/* ── Tables ───────────────────────────────────────────────────────────────── */
+
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th {
+  text-align: left;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  padding: 0 10px 9px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+td { padding: 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+tr:last-child td { border-bottom: 0; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.mini-stack {
+  display: flex;
+  gap: 2px;               /* the surface gap, same 2px as the chart */
+  height: 7px;
+  border-radius: 999px;
+  overflow: hidden;
+  min-width: 70px;
+}
+.mini-stack i { display: block; height: 100%; }
+.mini-stack .k1 { background: var(--series-1); }
+.mini-stack .k2 { background: var(--series-2); }
+
+/* ── Badges ───────────────────────────────────────────────────────────────── */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--text-secondary);
+}
+.badge::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+}
+.badge.done::before { background: var(--status-good); }
+.badge.open::before { background: var(--status-open); }
+
+/* ── Filters ──────────────────────────────────────────────────────────────── */
+
+.filters {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-bottom: 14px;
+}
+.filters input, .filters select {
+  font: inherit;
+  font-size: 13.5px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-primary);
+}
+.filters input[type="search"] { min-width: 240px; flex: 1 1 240px; }
+.filters .count { color: var(--text-muted); font-size: 13px; margin-left: auto; }
+.filters button {
+  font: inherit;
+  font-size: 13px;
+  padding: 7px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.filters button:hover { background: var(--wash); color: var(--text-primary); }
+
+mark {
+  background: color-mix(in srgb, var(--series-2) 30%, transparent);
+  color: inherit;
+  border-radius: 3px;
+  padding: 0 1px;
+}
+
+/* ── Threads ──────────────────────────────────────────────────────────────── */
+
+.thread { border-bottom: 1px solid var(--border); }
+.thread:last-child { border-bottom: 0; }
+.thread > summary {
+  cursor: pointer;
+  padding: 12px 4px;
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  list-style: none;
+}
+.thread > summary::-webkit-details-marker { display: none; }
+.thread > summary::before {
+  content: "\25B8";
+  color: var(--text-muted);
+  transition: transform 0.12s;
+  flex: none;
+}
+.thread[open] > summary::before { transform: rotate(90deg); }
+.thread .t-title { flex: 1; min-width: 0; }
+.thread .t-meta { font-size: 12.5px; color: var(--text-muted); white-space: nowrap; }
+.thread .t-body { padding: 0 4px 14px 22px; }
+
+.msg { padding: 9px 0; border-top: 1px dashed var(--border); }
+.msg:first-child { border-top: 0; }
+.msg .m-head {
+  display: flex;
+  gap: 9px;
+  align-items: baseline;
+  font-size: 12.5px;
+  color: var(--text-muted);
+  margin-bottom: 3px;
+}
+.msg .m-author { font-weight: 600; color: var(--text-secondary); }
+.msg .m-text { white-space: pre-wrap; word-wrap: break-word; }
+.msg .m-anchor {
+  margin-top: 5px;
+  padding-left: 10px;
+  border-left: 2px solid var(--border);
+  font-size: 13px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.pager { display: flex; gap: 10px; align-items: center; justify-content: center; margin-top: 16px; }
+.pager button {
+  font: inherit;
+  font-size: 13px;
+  padding: 7px 16px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.pager button:disabled { opacity: 0.4; cursor: default; }
+.pager .page-info { font-size: 13px; color: var(--text-muted); }
+
+.empty-state { text-align: center; color: var(--text-muted); padding: 34px 0; }
+
+footer {
+  margin-top: 40px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+  font-size: 12.5px;
+  color: var(--text-muted);
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+footer a { color: inherit; }
+
+/* ── Print ────────────────────────────────────────────────────────────────── */
+/* Browsers print this to PDF cleanly, which is why the package ships no PDF
+ * dependency: use File > Print > Save as PDF. */
+
+@media print {
+  :root { --plane: #ffffff; --surface: #ffffff; --border: rgba(0, 0, 0, 0.2); }
+  body { padding: 0; font-size: 11pt; }
+  .theme-toggle, .filters, .pager, .seg, details.data-view { display: none !important; }
+  .card, .tile { break-inside: avoid; }
+  section { break-inside: avoid-page; }
+  .thread .t-body { display: block !important; }
+}

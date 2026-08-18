@@ -267,3 +267,108 @@ def test_batch_export_10k_total(tmp_path: Path) -> None:
     frame, seconds = measure(batch.to_dataframe)
     assert len(frame) == 10_000
     assert seconds < 2.0, f"batch DataFrame export took {seconds:.2f}s"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Reporting (v1.3)
+# ─────────────────────────────────────────────────────────────────────────────
+
+REPORT_SCALE = 5_000
+"""The roadmap's HTML acceptance criterion: 'Supports 5,000+ comments.'"""
+
+
+@pytest.fixture(scope="module")
+def report_parser(tmp_path_factory: pytest.TempPathFactory) -> dcp.DocxParser:
+    directory = tmp_path_factory.mktemp("report_perf")
+    path = build_docx(directory / "report.docx", make_specs(REPORT_SCALE, seed=21))
+    parser = dcp.DocxParser()
+    parser.parse(str(path))
+    assert parser.stats().total_comments == REPORT_SCALE
+    return parser
+
+
+def test_analytics_are_linear(tmp_path: Path) -> None:
+    """Aggregation must be one pass, not a nested walk over the threads."""
+    from docx_comment_parser.reporting import build_report_data
+
+    small = dcp.DocxParser()
+    small.parse(str(build_docx(tmp_path / "s.docx", make_specs(1_000, seed=6))))
+    big = dcp.DocxParser()
+    big.parse(str(build_docx(tmp_path / "b.docx", make_specs(10_000, seed=6))))
+
+    small_rows, big_rows = small.to_comments(), big.to_comments()
+    build_report_data(small_rows)  # warm up
+
+    _, small_seconds = measure(lambda: build_report_data(small_rows))
+    _, big_seconds = measure(lambda: build_report_data(big_rows))
+
+    ratio = big_seconds / max(small_seconds, 1e-4)
+    assert ratio < 40, f"10x comments cost {ratio:.1f}x the analytics time"
+
+
+def test_html_report_at_5000_comments(report_parser: dcp.DocxParser, tmp_path: Path) -> None:
+    """Roadmap: 'Supports 5,000+ comments.' Must also stay a sane file size."""
+    pytest.importorskip("jinja2")
+    target = tmp_path / "big_report.html"
+    _, seconds = measure(lambda: report_parser.export_html_report(target))
+
+    assert seconds < 10.0, f"HTML report of {REPORT_SCALE} comments took {seconds:.2f}s"
+
+    size_mb = target.stat().st_size / (1024 * 1024)
+    # Comments are embedded once as compact JSON rather than as rendered rows,
+    # so the file stays emailable at this scale.
+    assert size_mb < 8, f"report is {size_mb:.1f} MB"
+
+
+def test_html_report_is_self_contained_at_scale(
+    report_parser: dcp.DocxParser, tmp_path: Path
+) -> None:
+    """The offline promise has to survive scale, not just the 3-comment fixture."""
+    pytest.importorskip("jinja2")
+    import re
+
+    target = report_parser.export_html_report(tmp_path / "offline.html")
+    body = target.read_text(encoding="utf-8")
+    assert re.findall(r'(?:src|href)\s*=\s*["\'](?!#)([^"\']+)', body) == []
+
+
+def test_markdown_report_at_5000_comments(report_parser: dcp.DocxParser) -> None:
+    _, seconds = measure(report_parser.to_markdown_report)
+    assert seconds < 10.0, f"Markdown report took {seconds:.2f}s"
+
+
+def test_report_memory_is_bounded(report_parser: dcp.DocxParser, tmp_path: Path) -> None:
+    """Building a report must not hold several full copies of the document."""
+    pytest.importorskip("jinja2")
+    gc.collect()
+    tracemalloc.start()
+    try:
+        report_parser.export_html_report(tmp_path / "mem.html")
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    peak_mb = peak / (1024 * 1024)
+    assert peak_mb < 200, f"peak memory {peak_mb:.1f} MB for a {REPORT_SCALE}-comment report"
+
+
+def test_reporting_import_does_not_pull_in_jinja2() -> None:
+    """Importing the library must stay dependency-free and fast.
+
+    Jinja2 is imported inside render_html_report, not at module scope, so a
+    program that only parses never pays for it.
+    """
+    import subprocess
+    import sys
+
+    code = (
+        "import sys; import docx_comment_parser;"
+        "assert 'jinja2' not in sys.modules, 'jinja2 imported eagerly';"
+        "assert 'pandas' not in sys.modules, 'pandas imported eagerly';"
+        "print('clean')"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+    assert "clean" in result.stdout

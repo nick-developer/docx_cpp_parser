@@ -1,0 +1,226 @@
+{#-
+  Interactive review report.
+
+  Rendered by report_builder.py with autoescape ON: every value interpolated
+  here is escaped unless explicitly marked safe, and the only values marked safe
+  are ones this package generated itself (the inlined CSS/JS, the SVG charts,
+  and the JSON payload, which is escaped for a <script> context in Python).
+
+  The output is a single self-contained file — no external requests of any kind,
+  so it opens from a USB stick on a machine with no network.
+-#}
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ data.overview.title }} — comment review</title>
+<style>{{ css | safe }}</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="head">
+    <div>
+      <h1>{{ data.overview.title }}</h1>
+      <div class="sub">
+        Comment review report · generated {{ data.overview.generated_at.strftime("%Y-%m-%d %H:%M UTC") }}
+        {%- if data.overview.documents %}<br><code>{{ data.overview.documents | join(" · ") }}</code>{% endif %}
+      </div>
+    </div>
+    <button class="theme-toggle" id="theme-toggle" type="button">Light / dark</button>
+  </header>
+
+  {# ── Overview ────────────────────────────────────────────────────────── #}
+  <section>
+    <h2>Overview</h2>
+    <div class="tiles">
+      <div class="tile hero">
+        <div class="label">Total comments</div>
+        <div class="value">{{ "{:,}".format(data.overview.total_comments) }}</div>
+        <div class="note">{{ "{:,}".format(data.overview.root_comments) }} root · {{ "{:,}".format(data.overview.replies) }} replies</div>
+      </div>
+      <div class="tile">
+        <div class="label">Resolved</div>
+        <div class="value">{{ "{:,}".format(data.overview.resolved) }}</div>
+        <div class="note">{{ "%.0f"|format(data.overview.resolution_percent) }}% of all comments</div>
+        <div class="meter"><span style="width: {{ "%.1f"|format(data.overview.resolution_percent) }}%"></span></div>
+      </div>
+      <div class="tile">
+        <div class="label">Still open</div>
+        <div class="value">{{ "{:,}".format(data.overview.unresolved) }}</div>
+        <div class="note">needing attention</div>
+      </div>
+      <div class="tile">
+        <div class="label">Reviewers</div>
+        <div class="value">{{ "{:,}".format(data.overview.unique_authors) }}</div>
+        <div class="note">{{ "{:,}".format(data.overview.threads) }} conversation{{ "" if data.overview.threads == 1 else "s" }}</div>
+      </div>
+      <div class="tile">
+        <div class="label">Activity</div>
+        <div class="value" style="font-size: 18px; padding-top: 8px;">
+          {%- if data.overview.earliest %}{{ data.overview.earliest.strftime("%Y-%m-%d") }}{% else %}—{% endif %}
+        </div>
+        <div class="note">
+          {%- if data.overview.latest %}through {{ data.overview.latest.strftime("%Y-%m-%d") }}{% else %}no dated comments{% endif %}
+        </div>
+      </div>
+    </div>
+  </section>
+
+  {# ── Author analytics ────────────────────────────────────────────────── #}
+  <section>
+    <h2>Reviewers</h2>
+    <div class="card">
+      {%- if data.authors %}
+      <table>
+        <thead>
+          <tr>
+            <th>Reviewer</th>
+            <th class="num">Comments</th>
+            <th class="num">Resolved</th>
+            <th class="num">Open</th>
+            <th class="num">Resolution rate</th>
+            <th style="width: 120px;">Split</th>
+            <th>Active</th>
+          </tr>
+        </thead>
+        <tbody>
+          {%- for author in data.authors %}
+          <tr>
+            <td>{{ author.author or "—" }}{% if author.initials %} <span style="color: var(--text-muted); font-size: 12px;">({{ author.initials }})</span>{% endif %}</td>
+            <td class="num">{{ "{:,}".format(author.total) }}</td>
+            <td class="num">{{ "{:,}".format(author.resolved) }}</td>
+            <td class="num">{{ "{:,}".format(author.unresolved) }}</td>
+            <td class="num">{{ "%.0f"|format(author.resolution_percent) }}%</td>
+            <td>
+              {#- A miniature of the timeline chart's encoding, so the same two
+                  colours mean the same two things everywhere in the report. -#}
+              <div class="mini-stack" role="img"
+                   aria-label="{{ author.resolved }} resolved, {{ author.unresolved }} open">
+                {%- if author.resolved %}<i class="k1" style="width: {{ "%.1f"|format(author.resolution_percent) }}%"></i>{% endif %}
+                {%- if author.unresolved %}<i class="k2" style="width: {{ "%.1f"|format(100 - author.resolution_percent) }}%"></i>{% endif %}
+              </div>
+            </td>
+            <td style="color: var(--text-muted); font-size: 13px; white-space: nowrap;">
+              {%- if author.first %}{{ author.first.strftime("%Y-%m-%d") }}{% if author.last and author.last != author.first %} → {{ author.last.strftime("%Y-%m-%d") }}{% endif %}
+              {%- else %}—{% endif %}
+            </td>
+          </tr>
+          {%- endfor %}
+        </tbody>
+      </table>
+      {%- else %}
+      <p class="empty-state">No comments to summarise.</p>
+      {%- endif %}
+    </div>
+  </section>
+
+  {# ── Timeline ────────────────────────────────────────────────────────── #}
+  <section>
+    <h2>Timeline</h2>
+    <div class="card">
+      <div class="chart-head">
+        {#- Two series, so a legend is always present: identity never rests on
+            colour-matching alone. -#}
+        <div class="legend">
+          <span><i class="k1"></i>Resolved</span>
+          <span><i class="k2"></i>Open</span>
+        </div>
+        <div class="seg">
+          <button type="button" data-chart-scale="daily" aria-pressed="{{ "true" if default_scale == "daily" else "false" }}">Per day</button>
+          <button type="button" data-chart-scale="weekly" aria-pressed="{{ "true" if default_scale == "weekly" else "false" }}">Per week</button>
+        </div>
+      </div>
+
+      <div data-chart-panel="daily" {{ "" if default_scale == "daily" else "hidden" }}>
+        {{ daily_chart | safe }}
+        {%- if data.daily %}
+        <details class="data-view">
+          <summary>Show the numbers behind this chart</summary>
+          <table>
+            <thead><tr><th>Day</th><th class="num">Comments</th><th class="num">Resolved</th><th class="num">Open</th></tr></thead>
+            <tbody>
+              {%- for bucket in data.daily if bucket.total %}
+              <tr><td>{{ bucket.label }}</td><td class="num">{{ bucket.total }}</td><td class="num">{{ bucket.resolved }}</td><td class="num">{{ bucket.unresolved }}</td></tr>
+              {%- endfor %}
+            </tbody>
+          </table>
+        </details>
+        {%- endif %}
+      </div>
+
+      <div data-chart-panel="weekly" {{ "" if default_scale == "weekly" else "hidden" }}>
+        {{ weekly_chart | safe }}
+        {%- if data.weekly %}
+        <details class="data-view">
+          <summary>Show the numbers behind this chart</summary>
+          <table>
+            <thead><tr><th>Week</th><th class="num">Comments</th><th class="num">Resolved</th><th class="num">Open</th></tr></thead>
+            <tbody>
+              {%- for bucket in data.weekly if bucket.total %}
+              <tr><td>{{ bucket.label }}</td><td class="num">{{ bucket.total }}</td><td class="num">{{ bucket.resolved }}</td><td class="num">{{ bucket.unresolved }}</td></tr>
+              {%- endfor %}
+            </tbody>
+          </table>
+        </details>
+        {%- endif %}
+      </div>
+    </div>
+  </section>
+
+  {# ── Comments: thread explorer + full table ──────────────────────────── #}
+  <section id="comments">
+    <h2>Comments</h2>
+
+    <div class="filters">
+      <input type="search" id="f-search" placeholder="Search comments, anchored text and authors…"
+             aria-label="Search comments">
+      <select id="f-author" aria-label="Filter by author">
+        <option value="">All reviewers</option>
+        {%- for author in data.authors %}
+        <option value="{{ author.author }}">{{ author.author or "—" }}</option>
+        {%- endfor %}
+      </select>
+      <select id="f-status" aria-label="Filter by status">
+        <option value="">Any status</option>
+        <option value="open">Open only</option>
+        <option value="resolved">Resolved only</option>
+      </select>
+      <input type="date" id="f-from" aria-label="From date" title="From date">
+      <input type="date" id="f-to" aria-label="To date" title="To date">
+      <button type="button" id="f-reset">Reset</button>
+      <span class="count" id="result-count"></span>
+    </div>
+
+    <div class="chart-head" style="margin-bottom: 12px;">
+      <div class="seg">
+        <button type="button" data-view="threads" aria-pressed="true">Threads</button>
+        <button type="button" data-view="table" aria-pressed="false">Table</button>
+      </div>
+    </div>
+
+    <div class="card" id="results"></div>
+
+    <div class="pager" id="pager" hidden>
+      <button type="button" id="prev">← Previous</button>
+      <span class="page-info" id="page-info"></span>
+      <button type="button" id="next">Next →</button>
+    </div>
+  </section>
+
+  <footer>
+    <span>Generated by docx-comment-parser {{ version }} · self-contained, works offline</span>
+    <span>Print this page to save it as a PDF</span>
+  </footer>
+</div>
+
+<div class="tooltip" id="tooltip" role="status" aria-live="polite"></div>
+
+{#- The payload is JSON, not JavaScript: a <script type="application/json">
+    block is inert, and the < > & characters were escaped in Python so the
+    document's own text can never close this tag early. -#}
+<script type="application/json" id="report-data">{{ payload | safe }}</script>
+<script>{{ js | safe }}</script>
+</body>
+</html>

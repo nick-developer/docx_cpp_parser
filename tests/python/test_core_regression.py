@@ -58,7 +58,12 @@ def test_exception_hierarchy_unchanged() -> None:
 
 
 def test_version_is_reported() -> None:
-    assert dcp.__version__ == "1.2.0"
+    # The exact value moves every release; what this guards is that the
+    # attribute exists, is a string, and is ordered sensibly against the
+    # release that introduced the export layer.
+    assert isinstance(dcp.__version__, str)
+    parts = tuple(int(piece) for piece in dcp.__version__.split("."))
+    assert parts >= (1, 2, 0)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
