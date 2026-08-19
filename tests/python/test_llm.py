@@ -774,6 +774,79 @@ def test_a_non_positive_budget_is_rejected(review_records: List[LLMRecord]) -> N
         chunk_records(review_records, max_tokens=0)
 
 
+# ── Multi-document datasets ──────────────────────────────────────────────────
+#
+# A comment id is only unique within one document — Word numbers each file from
+# scratch — so two documents in one dataset routinely both have a thread rooted
+# at id 1. Everything downstream that identifies a thread must therefore key on
+# (document, thread_id). These tests use a dataset built from two real .docx
+# files with deliberately colliding ids.
+
+
+def _relabel(records: List[LLMRecord], document: str) -> List[LLMRecord]:
+    """The same records, attributed to a different document."""
+    import dataclasses
+
+    return [dataclasses.replace(record, document=document) for record in records]
+
+
+def test_threads_from_different_documents_are_never_merged(
+    review_records: List[LLMRecord],
+) -> None:
+    """Two documents, colliding root ids. Merging them puts one document's
+    reply under another document's comment — a record that reads perfectly and
+    is entirely wrong."""
+    mixed = _relabel(review_records, "a.docx") + _relabel(review_records, "b.docx")
+    chunks = chunk_records(mixed, max_tokens=1_000_000)
+
+    assert len(chunks) == 1
+    keys = chunks[0].thread_keys
+    assert len(keys) == len(set(keys))
+    assert {document for document, _ in keys} == {"a.docx", "b.docx"}
+
+    distinct_threads = {(r.document, r.thread_id) for r in mixed}
+    assert set(keys) == distinct_threads
+    assert len(chunks[0].threads) == len(distinct_threads)
+
+
+def test_a_colliding_root_id_is_reported_once_per_document(
+    review_records: List[LLMRecord],
+) -> None:
+    """chunk.threads exposes ids, and the same id appearing twice is the
+    truthful answer when two documents each have a thread with that root."""
+    root = review_records[0].thread_id
+    mixed = _relabel([review_records[0]], "a.docx") + _relabel(
+        [review_records[0]], "b.docx"
+    )
+    chunk = chunk_records(mixed, max_tokens=1_000_000)[0]
+
+    assert chunk.threads == (root, root)
+    assert chunk.thread_keys == (("a.docx", root), ("b.docx", root))
+
+
+def test_a_thread_split_across_documents_is_packed_per_document(
+    review_records: List[LLMRecord],
+) -> None:
+    """Grouping keys on the document, so a tight budget separates the two
+    documents' same-id threads instead of packing them as one oversized group."""
+    mixed = _relabel(review_records, "a.docx") + _relabel(review_records, "b.docx")
+    chunks = chunk_records(mixed, max_tokens=150)
+
+    seen: Dict[Any, int] = {}
+    for chunk in chunks:
+        for record in chunk.records:
+            key = (record.document, record.thread_id)
+            assert seen.setdefault(key, chunk.index) == chunk.index
+    assert sum(len(chunk.records) for chunk in chunks) == len(mixed)
+
+
+def test_thread_keys_and_threads_agree_on_count(
+    review_records: List[LLMRecord],
+) -> None:
+    for chunk in chunk_records(review_records, max_tokens=120):
+        assert len(chunk.threads) == len(chunk.thread_keys)
+
+
 def test_a_custom_token_counter_is_used(review_records: List[LLMRecord]) -> None:
     chunks = chunk_records(
         review_records, max_tokens=100, token_counter=lambda text: 1
@@ -781,10 +854,144 @@ def test_a_custom_token_counter_is_used(review_records: List[LLMRecord]) -> None
     assert len(chunks) == 1
 
 
-def test_chunk_texts_packs_plain_strings() -> None:
-    batches = chunk_texts(["a" * 400, "b" * 400, "c" * 400], max_tokens=250)
-    assert len(batches) > 1
-    assert sum(len(batch) for batch in batches) == 3
+# ── chunk_texts ──────────────────────────────────────────────────────────────
+#
+# These pass an explicit ``token_counter`` wherever the assertion depends on a
+# specific number of batches.  The default counter is tiktoken when the [llm]
+# extra is installed and a character heuristic when it is not, and the two
+# disagree by an order of magnitude on degenerate input — 400 repeated "a"s is
+# ~112 tokens by the heuristic and ~25 under a real BPE vocabulary, which merges
+# the run.  A packing test written against the heuristic's number therefore
+# stops testing packing and starts testing which extras are installed.  Pinning
+# the counter tests the thing the function actually promises: the budget is
+# respected, nothing is dropped, and order is preserved, whatever the counter
+# says.
+
+#: One token per character — the arithmetic below is then readable by eye.
+_PER_CHAR = len
+
+
+def test_chunk_texts_splits_when_the_corpus_exceeds_the_budget() -> None:
+    batches = chunk_texts(
+        ["a" * 100, "b" * 100, "c" * 100], max_tokens=250, token_counter=_PER_CHAR
+    )
+    assert [len(batch) for batch in batches] == [2, 1]
+
+
+def test_chunk_texts_keeps_every_text_exactly_once_and_in_order() -> None:
+    texts = [f"text-{index} " + "word " * (index % 7) for index in range(50)]
+    batches = chunk_texts(texts, max_tokens=60, token_counter=_PER_CHAR)
+    assert [text for batch in batches for text in batch] == texts
+
+
+def test_no_chunk_text_batch_exceeds_the_budget() -> None:
+    """The whole point of a budget: nothing over it, except a single text that
+    is over it on its own."""
+    texts = ["word " * length for length in range(1, 40)]
+    budget = 300
+    batches = chunk_texts(texts, max_tokens=budget, token_counter=_PER_CHAR)
+    for batch in batches:
+        if len(batch) == 1:
+            continue  # an unsplittable text is allowed to exceed, see below
+        assert sum(_PER_CHAR(text) for text in batch) <= budget
+
+
+def test_chunk_texts_packs_greedily_rather_than_one_per_batch() -> None:
+    """A correct-but-useless implementation returns one batch per text. This is
+    what separates packing from iteration."""
+    texts = ["x" * 10] * 20
+    batches = chunk_texts(texts, max_tokens=100, token_counter=_PER_CHAR)
+    assert len(batches) == 2
+    assert all(len(batch) == 10 for batch in batches)
+
+
+def test_an_oversized_text_is_emitted_alone_not_cut() -> None:
+    """Never silently truncate: the caller can measure and decide."""
+    huge = "z" * 500
+    batches = chunk_texts(
+        ["a" * 10, huge, "b" * 10], max_tokens=100, token_counter=_PER_CHAR
+    )
+    assert [huge] in batches
+    assert "".join(text for batch in batches for text in batch) == "a" * 10 + huge + "b" * 10
+
+
+def test_chunk_texts_accepts_a_one_shot_iterable() -> None:
+    """The signature says Iterable, so a generator must not be consumed twice
+    into an empty result."""
+    batches = chunk_texts(
+        (f"item {index}" for index in range(10)),
+        max_tokens=25,
+        token_counter=_PER_CHAR,
+    )
+    assert sum(len(batch) for batch in batches) == 10
+
+
+def test_chunk_texts_handles_empty_and_blank_input() -> None:
+    assert chunk_texts([], max_tokens=100) == []
+    assert chunk_texts(["", "", ""], max_tokens=100) == [["", "", ""]]
+
+
+def test_chunk_texts_rejects_a_non_positive_budget() -> None:
+    """The same guard chunk_records has. Without it, max_tokens=0 returns one
+    batch per text — a plausible-looking result from a nonsense request."""
+    for budget in (0, -1):
+        with pytest.raises(ValueError, match="max_tokens"):
+            chunk_texts(["a", "b"], max_tokens=budget)
+
+
+def test_chunk_texts_uses_the_real_counter_by_default() -> None:
+    """The default counter, asserted without hard-coding its numbers.
+
+    The budget is *derived* from what the counter in use actually charges for
+    the fixture, so this holds identically under tiktoken and under the
+    heuristic. Room for exactly two paragraphs means exactly two per batch.
+    """
+    paragraph = (
+        "The supplier shall indemnify the customer against all losses arising "
+        "from any breach of the confidentiality obligations in clause 9. "
+    ) * 12
+    cost = estimate_tokens(paragraph)
+    assert cost > 0
+
+    batches = chunk_texts([paragraph] * 6, max_tokens=cost * 2)
+
+    assert [len(batch) for batch in batches] == [2, 2, 2]
+    for batch in batches:
+        assert sum(estimate_tokens(text) for text in batch) <= cost * 2
+
+
+def test_chunk_texts_gives_the_same_shape_under_either_token_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The back-end changes the numbers, never the guarantees.
+
+    This is the regression guard for the class of bug that made an earlier
+    version of this test fail once the [llm] extra was installed: an assertion
+    about *how many* batches a fixed budget produces is an assertion about the
+    tokenizer, not about the packer.  Here the budget is scaled to each
+    back-end's own count, and both must then pack identically.
+    """
+    from docx_comment_parser.llm import chunking
+
+    texts = [f"Comment {index}: the clause needs review. " * 4 for index in range(9)]
+
+    def shape_under(counter: Any) -> List[int]:
+        budget = counter(texts[0]) * 3
+        return [len(batch) for batch in chunk_texts(texts, max_tokens=budget,
+                                                    token_counter=counter)]
+
+    class WordEncoder:
+        def encode(self, text: str, disallowed_special: Any = ()) -> List[int]:
+            return [0] * len(text.split())
+
+    heuristic_shape = shape_under(chunking.estimate_tokens)
+
+    monkeypatch.setattr(chunking, "_encoder", WordEncoder())
+    monkeypatch.setattr(chunking, "_probed", True)
+    assert chunking.token_backend() == "tiktoken"
+    encoder_shape = shape_under(chunking.estimate_tokens)
+
+    assert heuristic_shape == encoder_shape == [3, 3, 3]
 
 
 def test_a_chunk_serialises_both_ways(review_records: List[LLMRecord]) -> None:

@@ -134,8 +134,24 @@ class Chunk:
     tokens: int
     """Estimated tokens for the records in this chunk, overhead included."""
 
-    threads: Tuple[int, ...]
-    """Root ids covered here, for a caller reassembling per-thread answers."""
+    thread_keys: Tuple[Tuple[str, int], ...]
+    """``(document, root id)`` for every thread covered here, in the order the
+    threads first appear.
+
+    Keyed on the document as well as the id because a comment id is only unique
+    within one document: two documents in the same dataset routinely both have a
+    thread rooted at id 1, and a caller reassembling per-thread answers across a
+    multi-document export needs to tell them apart."""
+
+    @property
+    def threads(self) -> Tuple[int, ...]:
+        """Root ids covered here, one entry per thread, in first-appearance
+        order.
+
+        Derived from :attr:`thread_keys`, so ``len(chunk.threads)`` is the
+        number of threads in the chunk even when two documents share a root id
+        — in that case the same id legitimately appears twice."""
+        return tuple(document_thread[1] for document_thread in self.thread_keys)
 
     @property
     def is_first(self) -> bool:
@@ -241,7 +257,11 @@ def chunk_records(
             total=total,
             records=tuple(batch),
             tokens=tokens,
-            threads=tuple(dict.fromkeys(record.thread_id for record in batch)),
+            thread_keys=tuple(
+                dict.fromkeys(
+                    (record.document, record.thread_id) for record in batch
+                )
+            ),
         )
         for index, (batch, tokens) in enumerate(packed)
     ]
@@ -257,7 +277,20 @@ def chunk_texts(
 
     The same packing, for callers who are not using :class:`LLMRecord` — a list
     of comment bodies, a set of document paragraphs.
+
+    A single text larger than ``max_tokens`` is emitted as a batch of its own
+    rather than cut, matching what :func:`chunk_records` does with an oversized
+    thread: splitting a string mid-sentence to satisfy a budget produces a
+    request that fits and an answer that is wrong.
+
+    Raises :class:`ValueError` for a non-positive budget, as
+    :func:`chunk_records` does — a budget of zero has no sensible packing, and
+    silently returning one batch per text hides the caller's mistake behind a
+    plausible-looking result.
     """
+    if max_tokens <= 0:
+        raise ValueError(f"max_tokens must be positive, got {max_tokens}")
+
     counter = token_counter or (lambda text: estimate_tokens(text))
     batches: List[List[str]] = []
     current: List[str] = []
