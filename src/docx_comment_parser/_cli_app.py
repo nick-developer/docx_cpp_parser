@@ -8,10 +8,11 @@ the console script still exists and explains itself.
 
 from __future__ import annotations
 
+import json
 import sys
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 import typer
 from rich.console import Console
@@ -763,6 +764,476 @@ def batch(
 
     if errors:
         raise typer.Exit(code=1)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  LLM export, classification and anonymisation (new in 1.5)
+# ─────────────────────────────────────────────────────────────────────────────
+
+POLICY_OPT = typer.Option(
+    None, "--anonymize", "-A",
+    help=(
+        "Redact private information before exporting. One of: "
+        "balanced, strict, names-only, secrets-only, gdpr."
+    ),
+)
+
+
+def _resolve_policy_option(name: Optional[str]) -> Optional[str]:
+    """Validate an --anonymize value at parse time, not mid-export."""
+    if name is None:
+        return None
+    from .privacy.policy import PRESET_NAMES, resolve_policy
+
+    try:
+        resolve_policy(name)
+    except ValueError:
+        raise typer.BadParameter(
+            f"unknown policy {name!r}. Choose one of: "
+            + ", ".join(sorted(PRESET_NAMES)).replace("_", "-")
+        )
+    return name.replace("-", "_")
+
+
+def _warn_if_private(comments: Sequence[Comment], anonymized: bool) -> None:
+    """Scan an export that is about to leave the machine and say what is in it.
+
+    Not a refusal and not a prompt — the export still happens.  But a credential
+    pasted into a review comment is the single failure this feature exists to
+    prevent, and letting it go to a model provider's logs without a word on the
+    terminal would be indefensible.
+    """
+    if anonymized:
+        return
+    from .privacy import scan_comments
+
+    scan = scan_comments(comments)
+    if not scan.findings:
+        return
+
+    kinds = ", ".join(
+        f"{entity} x{count}"
+        for entity, count in sorted(
+            scan.findings.items(), key=lambda item: (-item[1], str(item[0]))
+        )[:6]
+    )
+    style = "bold red" if scan.has_secrets else "yellow"
+    err_console.print(
+        f"[{style}]Privacy:[/] {scan.total} finding(s) in this export "
+        f"({kinds}). Re-run with --anonymize strict to redact them."
+    )
+
+
+@app.command()
+def llm(
+    file: Path = typer.Argument(
+        ..., exists=True, dir_okay=False, readable=True,
+        help="Path to the .docx file.",
+    ),
+    output: Optional[Path] = typer.Option(
+        None, "--output", "-o",
+        help="Write here. Defaults to standard output. .jsonl writes JSON Lines.",
+    ),
+    as_jsonl: bool = typer.Option(
+        False, "--jsonl", help="Write JSON Lines instead of a JSON array."
+    ),
+    embeddings: bool = typer.Option(
+        False, "--embeddings",
+        help="Emit retrieval documents ({id, text, metadata}) instead of records.",
+    ),
+    granularity: str = typer.Option(
+        "thread", "--granularity",
+        help="For --embeddings: one document per 'thread' or per 'comment'.",
+    ),
+    chars_before: int = typer.Option(
+        500, "--before", help="Characters of document context before the anchor."
+    ),
+    chars_after: int = typer.Option(
+        500, "--after", help="Characters of document context after the anchor."
+    ),
+    no_context: bool = typer.Option(
+        False, "--no-context",
+        help="Skip reading the document body. Faster; loses context_before/after.",
+    ),
+    no_threads: bool = typer.Option(
+        False, "--no-threads", help="Do not carry the thread on every record."
+    ),
+    anonymize: Optional[str] = POLICY_OPT,
+    vault: Optional[Path] = typer.Option(
+        None, "--vault",
+        help="Write the pseudonym mapping here (mode 0600). Keep it separate "
+             "from the export.",
+    ),
+    author: Optional[str] = AUTHOR_OPT,
+    contains: Optional[str] = CONTAINS_OPT,
+    resolved: bool = RESOLVED_OPT,
+    unresolved_only: bool = UNRESOLVED_OPT,
+    threads_only: bool = THREADS_OPT,
+    indent: int = typer.Option(2, "--indent", help="JSON indent; 0 for compact."),
+) -> None:
+    """Export comments as model-ready records.
+
+    Each record carries the comment, the document text either side of its
+    anchor, its thread, and rule-based category / intent / priority tags:
+
+        docx-comments llm spec.docx --anonymize strict -o review.jsonl
+
+    Without --anonymize the command scans the export and warns on standard
+    error about anything private it found. It never sends anything anywhere.
+    """
+    if granularity not in {"thread", "comment"}:
+        raise typer.BadParameter("--granularity must be 'thread' or 'comment'.")
+    policy = _resolve_policy_option(anonymize)
+
+    selected = filter_comments(
+        _load(file),
+        author=author,
+        contains=contains,
+        resolved=_resolved_flag(resolved, unresolved_only),
+        threads_only=threads_only,
+    )
+    _warn_if_private(selected, anonymized=policy is not None)
+
+    from .llm.dataset import build_dataset, to_embeddings_input
+    from .privacy import Anonymizer
+
+    engine = (
+        Anonymizer(policy, names=[comment.author for comment in selected])
+        if policy is not None
+        else None
+    )
+
+    if embeddings:
+        payload: Any = to_embeddings_input(
+            selected,
+            granularity=granularity,
+            chars_before=min(chars_before, 300),
+            chars_after=min(chars_after, 300),
+            include_context=not no_context,
+            anonymizer=engine,
+        )
+        records = None
+    else:
+        dataset = build_dataset(
+            selected,
+            chars_before=chars_before,
+            chars_after=chars_after,
+            include_thread=not no_threads,
+            include_context=not no_context,
+            anonymizer=engine,
+        )
+        payload = dataset.to_dicts()
+        records = dataset
+
+    use_jsonl = as_jsonl or (output is not None and output.suffix.lower() == ".jsonl")
+
+    if output is None:
+        # print(), not console.print(): Rich would re-wrap and highlight the
+        # payload, which breaks piping into jq.
+        if use_jsonl:
+            print("\n".join(json.dumps(row, ensure_ascii=False) for row in payload))
+        else:
+            print(json.dumps(payload, ensure_ascii=False, indent=indent or None))
+    else:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        if use_jsonl:
+            with output.open("w", encoding="utf-8", newline="\n") as handle:
+                for row in payload:
+                    handle.write(json.dumps(row, ensure_ascii=False))
+                    handle.write("\n")
+        else:
+            output.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=indent or None),
+                encoding="utf-8",
+            )
+        console.print(
+            f"[green]{GLYPH_OK}[/] Wrote {len(payload)} record(s) to [bold]{output}[/]"
+        )
+
+    if engine is not None and vault is not None:
+        engine.vault.export(vault)
+        err_console.print(
+            f"[yellow]Vault:[/] {len(engine.vault)} mapping(s) written to "
+            f"[bold]{vault}[/]. This file re-identifies the export — store it "
+            f"separately."
+        )
+
+    if records is not None and records.anonymization is not None:
+        report = records.anonymization
+        if not report.clean:
+            err_console.print(
+                f"[bold red]Warning[/] {len(report.residual)} value(s) still "
+                f"detectable after redaction."
+            )
+
+
+@app.command()
+def prompt(
+    file: Path = typer.Argument(
+        ..., exists=True, dir_okay=False, readable=True,
+        help="Path to the .docx file.",
+    ),
+    kind: str = typer.Option(
+        "action-items", "--kind", "-k",
+        help="summary, action-items, resolution, triage or risk.",
+    ),
+    output: Optional[Path] = typer.Option(
+        None, "--output", "-o", help="Write here. Defaults to standard output."
+    ),
+    budget: int = typer.Option(
+        60_000, "--budget", help="Token budget for the comments inside the prompt."
+    ),
+    as_json: bool = typer.Option(
+        False, "--json", help="Emit {system, user, included, omitted} as JSON."
+    ),
+    anonymize: Optional[str] = POLICY_OPT,
+    author: Optional[str] = AUTHOR_OPT,
+    contains: Optional[str] = CONTAINS_OPT,
+    resolved: bool = RESOLVED_OPT,
+    unresolved_only: bool = UNRESOLVED_OPT,
+) -> None:
+    """Build a ready-to-send prompt about this review.
+
+    Packs as many comments as the budget allows, says what did not fit, and
+    requires every claim in the answer to cite a comment id:
+
+        docx-comments prompt spec.docx --kind risk --anonymize strict
+
+    Prints the prompt. Sending it is your business — this command has no
+    network access and no API key.
+    """
+    from .llm import prompts as prompt_builders
+    from .llm.dataset import build_dataset
+
+    # Annotated because the builders differ in their optional keywords; without
+    # it mypy joins them to a type it will not let us call.
+    builders: Dict[str, Callable[..., Any]] = {
+        "summary": prompt_builders.create_review_summary_prompt,
+        "action-items": prompt_builders.create_action_items_prompt,
+        "resolution": prompt_builders.create_resolution_prompt,
+        "triage": prompt_builders.create_triage_prompt,
+        "risk": prompt_builders.create_risk_prompt,
+    }
+    builder = builders.get(kind.replace("_", "-"))
+    if builder is None:
+        raise typer.BadParameter(
+            f"unknown prompt kind {kind!r}. Choose one of: "
+            + ", ".join(sorted(builders))
+        )
+
+    policy = _resolve_policy_option(anonymize)
+    selected = filter_comments(
+        _load(file),
+        author=author,
+        contains=contains,
+        resolved=_resolved_flag(resolved, unresolved_only),
+    )
+    _warn_if_private(selected, anonymized=policy is not None)
+
+    dataset = build_dataset(selected, anonymize=policy)
+    built = builder(dataset.records, budget=budget)
+
+    text = (
+        json.dumps(built.to_dict(), ensure_ascii=False, indent=2)
+        if as_json
+        else f"{built.system}\n\n{'-' * 70}\n\n{built.user}"
+    )
+
+    if output is None:
+        print(text)
+    else:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(text, encoding="utf-8")
+        console.print(
+            f"[green]{GLYPH_OK}[/] Wrote a {built.kind} prompt "
+            f"(~{built.tokens} tokens, {len(built.included)} comment(s)) "
+            f"to [bold]{output}[/]"
+        )
+
+    if built.omitted:
+        err_console.print(
+            f"[yellow]{built.omitted} comment(s) did not fit the budget "
+            f"and are not in the prompt.[/]"
+        )
+
+
+@app.command()
+def classify(
+    file: Path = typer.Argument(
+        ..., exists=True, dir_okay=False, readable=True,
+        help="Path to the .docx file.",
+    ),
+    category: Optional[str] = typer.Option(
+        None, "--category", help="Show only this category (case-insensitive)."
+    ),
+    priority: Optional[str] = typer.Option(
+        None, "--priority", help="Show only this priority: blocker, high, medium, low."
+    ),
+    actions_only: bool = typer.Option(
+        False, "--actions-only", help="Show only comments that ask for something."
+    ),
+    limit: Optional[int] = LIMIT_OPT,
+    author: Optional[str] = AUTHOR_OPT,
+    contains: Optional[str] = CONTAINS_OPT,
+    resolved: bool = RESOLVED_OPT,
+    unresolved_only: bool = UNRESOLVED_OPT,
+) -> None:
+    """Categorise comments by subject, intent and priority.
+
+    Rule-based, local, and instant — no model involved:
+
+        docx-comments classify spec.docx --priority blocker
+    """
+    from .llm.classification import classify_comment
+
+    selected = filter_comments(
+        _load(file),
+        author=author,
+        contains=contains,
+        resolved=_resolved_flag(resolved, unresolved_only),
+    )
+    tagged = [(comment, classify_comment(comment)) for comment in selected]
+
+    if category:
+        needle = category.casefold()
+        tagged = [pair for pair in tagged if pair[1].category.value.casefold() == needle]
+    if priority:
+        needle = priority.casefold()
+        tagged = [pair for pair in tagged if pair[1].priority.value == needle]
+    if actions_only:
+        tagged = [pair for pair in tagged if pair[1].action_required]
+
+    if not tagged:
+        console.print("[yellow]No comments matched.[/]")
+        return
+
+    counts: Dict[str, int] = {}
+    for _, result in tagged:
+        counts[result.category.value] = counts.get(result.category.value, 0) + 1
+
+    breakdown = Table(title="Categories", header_style="bold cyan")
+    breakdown.add_column("Category")
+    breakdown.add_column("Comments", justify="right")
+    for name, count in sorted(counts.items(), key=lambda item: (-item[1], item[0])):
+        breakdown.add_row(name, str(count))
+    console.print(breakdown)
+
+    shown = tagged[:limit] if limit else tagged
+    table = Table(title="Classified comments", header_style="bold cyan", expand=True)
+    table.add_column("ID", justify="right", style="dim", no_wrap=True)
+    table.add_column("Author", style="green", no_wrap=True)
+    table.add_column("Category", no_wrap=True)
+    table.add_column("Priority", no_wrap=True)
+    table.add_column("Intent", no_wrap=True)
+    table.add_column("Comment", overflow="fold")
+
+    priority_colour = {
+        "blocker": "bold red", "high": "red", "medium": "yellow", "low": "dim"
+    }
+    for comment, result in shown:
+        table.add_row(
+            str(comment.comment_id),
+            comment.author or GLYPH_EMPTY,
+            result.category.value,
+            f"[{priority_colour.get(result.priority.value, '')}]"
+            f"{result.priority.value}[/]",
+            result.intent.value.replace("_", " "),
+            _truncate(comment.text, 70),
+        )
+    console.print(table)
+
+    if limit and len(tagged) > limit:
+        console.print(f"[dim]Showing {limit} of {len(tagged)} comment(s).[/]")
+
+
+@app.command()
+def anonymize(
+    file: Path = typer.Argument(
+        ..., exists=True, dir_okay=False, readable=True,
+        help="Path to the .docx file.",
+    ),
+    policy: str = typer.Option(
+        "balanced", "--policy", "-p",
+        help="balanced, strict, names-only, secrets-only or gdpr.",
+    ),
+    output: Optional[Path] = typer.Option(
+        None, "--output", "-o",
+        help="Write the redacted comments here (.json or .csv). "
+             "Omit to only report what would change.",
+    ),
+    vault: Optional[Path] = typer.Option(
+        None, "--vault",
+        help="Write the pseudonym mapping here (mode 0600). Store it separately.",
+    ),
+    scan_only: bool = typer.Option(
+        False, "--scan", help="Only report what is there; change nothing."
+    ),
+    fail_on_secret: bool = typer.Option(
+        False, "--fail-on-secret",
+        help="Exit non-zero if a credential is found. For use in CI.",
+    ),
+) -> None:
+    """Mask names and other private information in a document's comments.
+
+        docx-comments anonymize contract.docx -p strict -o clean.json
+
+    With --scan it reports what is there and changes nothing, which is the
+    check to put in front of anything that leaves the machine.
+    """
+    from .privacy import Anonymizer, anonymize_comments, scan_comments
+    from .privacy.policy import PRESET_NAMES, resolve_policy
+
+    try:
+        resolved_policy = resolve_policy(policy.replace("-", "_"))
+    except ValueError:
+        raise typer.BadParameter(
+            f"unknown policy {policy!r}. Choose one of: "
+            + ", ".join(sorted(PRESET_NAMES)).replace("_", "-")
+        )
+
+    comments = _load(file)
+
+    if scan_only:
+        scan = scan_comments(comments)
+        console.print(Panel(scan.summary(), title="Privacy scan", expand=False))
+        if fail_on_secret and scan.has_secrets:
+            raise typer.Exit(code=1)
+        return
+
+    engine = Anonymizer(
+        resolved_policy, names=[comment.author for comment in comments]
+    )
+    cleaned, report = anonymize_comments(comments, anonymizer=engine)
+    console.print(Panel(report.summary(), title="Anonymisation", expand=False))
+
+    if output is not None:
+        if output.suffix.lower() == ".csv":
+            csv_exporter.export_csv(cleaned, output)
+        else:
+            json_exporter.export_json(cleaned, output)
+        console.print(
+            f"[green]{GLYPH_OK}[/] Wrote {len(cleaned)} redacted comment(s) "
+            f"to [bold]{output}[/]"
+        )
+
+    if vault is not None:
+        engine.vault.export(vault)
+        err_console.print(
+            f"[yellow]Vault:[/] {len(engine.vault)} mapping(s) written to "
+            f"[bold]{vault}[/]. Anyone with this file can undo the redaction."
+        )
+
+    if not report.clean:
+        err_console.print(
+            f"[bold red]Warning[/] {len(report.residual)} value(s) still "
+            f"detectable after redaction."
+        )
+        raise typer.Exit(code=1)
+
+    if fail_on_secret:
+        scan = scan_comments(comments)
+        if scan.has_secrets:
+            raise typer.Exit(code=1)
 
 
 def _version_callback(value: bool) -> None:

@@ -37,12 +37,17 @@ def invoke(*args: str):
 def test_help_lists_every_command() -> None:
     result = invoke("--help")
     assert result.exit_code == 0
-    for command in ("parse", "stats", "export", "unresolved", "batch", "report", "diff"):
+    for command in (
+        "parse", "stats", "export", "unresolved", "batch", "report", "diff",
+        "llm", "prompt", "classify", "anonymize",
+    ):
         assert command in result.output
 
 
 @pytest.mark.parametrize(
-    "command", ["parse", "stats", "export", "unresolved", "batch", "report", "diff"]
+    "command",
+    ["parse", "stats", "export", "unresolved", "batch", "report", "diff",
+     "llm", "prompt", "classify", "anonymize"],
 )
 def test_every_command_has_help(command: str) -> None:
     """Roadmap acceptance criterion: useful help for every command."""
@@ -797,3 +802,265 @@ def test_diff_title_can_be_overridden(
     target = tmp_path / "diff.md"
     invoke("diff", str(before), str(after), "--title", "Round two", "-o", str(target))
     assert target.read_text(encoding="utf-8").startswith("# Comment diff — Round two")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  llm, prompt, classify, anonymize  (v1.5)
+# ─────────────────────────────────────────────────────────────────────────────
+
+SENSITIVE_SPECS = [
+    CommentSpec(
+        id=0, author="Alice Tester", initials="AT",
+        text="This indemnity clause creates unlimited liability. Legal must sign off.",
+        anchor="The supplier shall indemnify the customer.",
+    ),
+    CommentSpec(
+        id=1, author="Bob Reviewer", initials="BR", parent=0,
+        text="Agreed. Mail me at bob.reviewer@acme.example about it.",
+    ),
+    CommentSpec(
+        id=2, author="Carol Editor", initials="CE",
+        text="Security: key AKIAIOSFODNN7EXAMPLE is hardcoded. This is a blocker.",
+        anchor="Authorization: Bearer value",
+    ),
+    CommentSpec(
+        id=3, author="Dave Architect", initials="DA", done=True,
+        text="Typo: 'recieve' should be 'receive'.",
+        anchor="You will recieve notice",
+    ),
+]
+
+
+@pytest.fixture(scope="module")
+def sensitive_docx(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    directory = tmp_path_factory.mktemp("cli_v15")
+    return build_docx(
+        directory / "contract.docx", SENSITIVE_SPECS,
+        body_text="Section 4 sets out the commercial terms of the agreement.",
+    )
+
+
+# ── llm ─────────────────────────────────────────────────────────────────────
+
+
+def test_llm_writes_json_to_stdout(sensitive_docx: Path) -> None:
+    result = invoke("llm", str(sensitive_docx), "--no-context")
+    assert result.exit_code == 0
+    records = json.loads(result.stdout)
+    assert len(records) == len(SENSITIVE_SPECS)
+    assert records[0]["category"] == "Legal"
+
+
+def test_llm_warns_about_private_content_without_redacting(
+    sensitive_docx: Path,
+) -> None:
+    """The safety net: an export leaving the machine unredacted says so."""
+    result = invoke("llm", str(sensitive_docx), "--no-context")
+    assert result.exit_code == 0
+    assert "Privacy" in result.output
+    assert "API_KEY" in result.output
+
+
+def test_llm_does_not_warn_when_redacting(sensitive_docx: Path) -> None:
+    result = invoke("llm", str(sensitive_docx), "--no-context", "-A", "strict")
+    assert "Privacy:" not in result.output
+
+
+def test_llm_anonymises_the_output(sensitive_docx: Path, tmp_path: Path) -> None:
+    target = tmp_path / "records.json"
+    result = invoke(
+        "llm", str(sensitive_docx), "-o", str(target), "-A", "strict", "--no-context"
+    )
+    assert result.exit_code == 0
+    payload = target.read_text(encoding="utf-8")
+    assert "Alice" not in payload
+    assert "AKIAIOSFODNN7EXAMPLE" not in payload
+    assert "bob.reviewer@acme.example" not in payload
+
+
+def test_llm_writes_jsonl_by_extension(sensitive_docx: Path, tmp_path: Path) -> None:
+    target = tmp_path / "records.jsonl"
+    assert invoke("llm", str(sensitive_docx), "-o", str(target), "--no-context").exit_code == 0
+    lines = target.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == len(SENSITIVE_SPECS)
+    assert json.loads(lines[0])["comment_id"] == 0
+
+
+def test_llm_jsonl_to_stdout(sensitive_docx: Path) -> None:
+    result = invoke("llm", str(sensitive_docx), "--jsonl", "--no-context")
+    lines = [line for line in result.stdout.splitlines() if line.startswith("{")]
+    assert len(lines) == len(SENSITIVE_SPECS)
+
+
+def test_llm_embeddings_mode(sensitive_docx: Path) -> None:
+    result = invoke("llm", str(sensitive_docx), "--embeddings", "--no-context")
+    documents = json.loads(result.stdout)
+    assert all(set(doc) == {"id", "text", "metadata"} for doc in documents)
+
+
+def test_llm_rejects_an_unknown_granularity(sensitive_docx: Path) -> None:
+    result = invoke("llm", str(sensitive_docx), "--embeddings", "--granularity", "page")
+    assert result.exit_code != 0
+
+
+def test_llm_rejects_an_unknown_policy(sensitive_docx: Path) -> None:
+    result = invoke("llm", str(sensitive_docx), "-A", "paranoid")
+    assert result.exit_code != 0
+    assert "unknown policy" in result.output or "Invalid value" in result.output
+
+
+def test_llm_writes_a_vault(sensitive_docx: Path, tmp_path: Path) -> None:
+    vault = tmp_path / "vault.json"
+    result = invoke(
+        "llm", str(sensitive_docx), "-o", str(tmp_path / "r.jsonl"),
+        "-A", "balanced", "--vault", str(vault), "--no-context",
+    )
+    assert result.exit_code == 0
+    mapping = json.loads(vault.read_text(encoding="utf-8"))["mapping"]
+    assert "Alice Tester" in mapping.values()
+
+
+def test_llm_respects_the_filters(sensitive_docx: Path) -> None:
+    result = invoke("llm", str(sensitive_docx), "--author", "Alice", "--no-context")
+    records = json.loads(result.stdout)
+    assert {record["author"] for record in records} == {"Alice Tester"}
+
+
+# ── prompt ──────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "kind", ["summary", "action-items", "resolution", "triage", "risk"]
+)
+def test_every_prompt_kind_builds(sensitive_docx: Path, kind: str) -> None:
+    result = invoke("prompt", str(sensitive_docx), "--kind", kind)
+    assert result.exit_code == 0
+    assert "JSON" in result.stdout
+
+
+def test_prompt_rejects_an_unknown_kind(sensitive_docx: Path) -> None:
+    result = invoke("prompt", str(sensitive_docx), "--kind", "poem")
+    assert result.exit_code != 0
+
+
+def test_prompt_json_form_carries_the_metadata(sensitive_docx: Path) -> None:
+    result = invoke("prompt", str(sensitive_docx), "--json", "--kind", "risk")
+    payload = json.loads(result.stdout)
+    assert payload["kind"] == "risk"
+    assert payload["system"] and payload["user"]
+
+
+def test_prompt_writes_to_a_file(sensitive_docx: Path, tmp_path: Path) -> None:
+    target = tmp_path / "prompt.txt"
+    result = invoke("prompt", str(sensitive_docx), "-o", str(target))
+    assert result.exit_code == 0
+    assert "comment" in target.read_text(encoding="utf-8").lower()
+
+
+def test_prompt_can_be_anonymised(sensitive_docx: Path) -> None:
+    result = invoke("prompt", str(sensitive_docx), "-A", "strict", "--kind", "summary")
+    assert "Alice Tester" not in result.stdout
+    assert "AKIAIOSFODNN7EXAMPLE" not in result.stdout
+
+
+def test_prompt_reports_a_corpus_that_did_not_fit(sensitive_docx: Path) -> None:
+    result = invoke("prompt", str(sensitive_docx), "--budget", "30")
+    assert "did not fit" in result.output
+
+
+# ── classify ────────────────────────────────────────────────────────────────
+
+
+def test_classify_shows_a_breakdown_and_a_table(sensitive_docx: Path) -> None:
+    result = invoke("classify", str(sensitive_docx))
+    assert result.exit_code == 0
+    assert "Categories" in result.output
+    assert "Legal" in result.output
+    assert "Security" in result.output
+
+
+def test_classify_filters_by_priority(sensitive_docx: Path) -> None:
+    result = invoke("classify", str(sensitive_docx), "--priority", "blocker")
+    assert result.exit_code == 0
+    assert "blocker" in result.output
+    assert "Typo" not in result.output
+
+
+def test_classify_filters_by_category(sensitive_docx: Path) -> None:
+    result = invoke("classify", str(sensitive_docx), "--category", "grammar")
+    assert "Grammar" in result.output
+    assert "indemnity" not in result.output
+
+
+def test_classify_actions_only(sensitive_docx: Path) -> None:
+    result = invoke("classify", str(sensitive_docx), "--actions-only")
+    assert result.exit_code == 0
+
+
+def test_classify_reports_an_empty_match(sensitive_docx: Path) -> None:
+    result = invoke("classify", str(sensitive_docx), "--category", "design")
+    assert "No comments matched" in result.output
+
+
+# ── anonymize ───────────────────────────────────────────────────────────────
+
+
+def test_anonymize_scan_changes_nothing(sensitive_docx: Path) -> None:
+    result = invoke("anonymize", str(sensitive_docx), "--scan")
+    assert result.exit_code == 0
+    assert "Privacy scan" in result.output
+    assert "credential was detected" in result.output
+
+
+def test_anonymize_scan_can_fail_a_build(sensitive_docx: Path) -> None:
+    """The CI gate: a credential in a comment stops the pipeline."""
+    result = invoke("anonymize", str(sensitive_docx), "--scan", "--fail-on-secret")
+    assert result.exit_code == 1
+
+
+def test_anonymize_writes_redacted_json(sensitive_docx: Path, tmp_path: Path) -> None:
+    target = tmp_path / "clean.json"
+    result = invoke("anonymize", str(sensitive_docx), "-p", "strict", "-o", str(target))
+    assert result.exit_code == 0
+    payload = target.read_text(encoding="utf-8")
+    assert "Alice Tester" not in payload
+    assert "AKIAIOSFODNN7EXAMPLE" not in payload
+    assert json.loads(payload)
+
+
+def test_anonymize_writes_redacted_csv(sensitive_docx: Path, tmp_path: Path) -> None:
+    target = tmp_path / "clean.csv"
+    assert invoke(
+        "anonymize", str(sensitive_docx), "-p", "strict", "-o", str(target)
+    ).exit_code == 0
+    assert "Alice Tester" not in target.read_text(encoding="utf-8")
+
+
+def test_anonymize_reports_what_it_did(sensitive_docx: Path) -> None:
+    result = invoke("anonymize", str(sensitive_docx), "-p", "strict")
+    assert "Anonymisation" in result.output
+    assert "API_KEY" in result.output
+    assert "Verified" in result.output
+
+
+def test_anonymize_accepts_hyphenated_presets(sensitive_docx: Path) -> None:
+    assert invoke("anonymize", str(sensitive_docx), "-p", "names-only").exit_code == 0
+
+
+def test_anonymize_rejects_an_unknown_preset(sensitive_docx: Path) -> None:
+    result = invoke("anonymize", str(sensitive_docx), "-p", "paranoid")
+    assert result.exit_code != 0
+
+
+def test_anonymize_writes_a_vault(sensitive_docx: Path, tmp_path: Path) -> None:
+    vault = tmp_path / "vault.json"
+    result = invoke(
+        "anonymize", str(sensitive_docx), "-p", "balanced", "--vault", str(vault)
+    )
+    assert result.exit_code == 0
+    assert "Alice Tester" in vault.read_text(encoding="utf-8")
+
+
+def test_a_clean_document_scans_clean(basic_docx: Path) -> None:
+    result = invoke("anonymize", str(basic_docx), "--scan", "--fail-on-secret")
+    assert result.exit_code == 0

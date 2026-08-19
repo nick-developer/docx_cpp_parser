@@ -16,6 +16,7 @@ from typing import Any, Dict, Iterable, List, Optional, Union
 import pandas
 import polars
 
+from .llm.dataset import LLMDataset
 from .models import Comment
 
 PathLike = Union[str, Path]
@@ -81,6 +82,30 @@ class DocxParser:
     def export_csv(
         self, path: PathLike, encoding: str = ..., delimiter: str = ...
     ) -> Path: ...
+    def to_llm_dataset(
+        self,
+        chars_before: int = ...,
+        chars_after: int = ...,
+        **kwargs: Any,
+    ) -> List[Dict[str, Any]]: ...
+    def to_llm_records(
+        self,
+        chars_before: int = ...,
+        chars_after: int = ...,
+        include_thread: bool = ...,
+        include_context: bool = ...,
+        classify: bool = ...,
+        anonymize: Optional[Any] = ...,
+        anonymizer: Optional[Any] = ...,
+    ) -> LLMDataset: ...
+    def to_llm_chunks(self, max_tokens: int = ..., **kwargs: Any) -> List[Any]: ...
+    def to_jsonl(self, **kwargs: Any) -> str: ...
+    def export_jsonl(self, path: PathLike, **kwargs: Any) -> Path: ...
+    def to_embeddings_input(
+        self, granularity: str = ..., **kwargs: Any
+    ) -> List[Dict[str, Any]]: ...
+    def anonymize(self, policy: Any = ..., **kwargs: Any) -> Any: ...
+    def privacy_scan(self) -> Any: ...
 
 class BatchParser:
     def __init__(self, max_threads: int = ...) -> None: ...
@@ -120,3 +145,28 @@ class BatchParser:
         delimiter: str = ...,
         file_paths: Optional[Iterable[str]] = ...,
     ) -> Path: ...
+    def to_llm_dataset(
+        self, file_paths: Optional[Iterable[str]] = ..., **kwargs: Any
+    ) -> List[Dict[str, Any]]: ...
+    def to_llm_records(
+        self, file_paths: Optional[Iterable[str]] = ..., **kwargs: Any
+    ) -> LLMDataset: ...
+    def export_jsonl(
+        self,
+        path: PathLike,
+        file_paths: Optional[Iterable[str]] = ...,
+        **kwargs: Any,
+    ) -> Path: ...
+    def to_embeddings_input(
+        self,
+        granularity: str = ...,
+        file_paths: Optional[Iterable[str]] = ...,
+        **kwargs: Any,
+    ) -> List[Dict[str, Any]]: ...
+    def anonymize(
+        self,
+        policy: Any = ...,
+        file_paths: Optional[Iterable[str]] = ...,
+        **kwargs: Any,
+    ) -> Any: ...
+    def privacy_scan(self, file_paths: Optional[Iterable[str]] = ...) -> Any: ...

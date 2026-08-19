@@ -6,9 +6,11 @@ Since v1.2 it also turns those comments into **spreadsheets, DataFrames and JSON
 
 v1.3 added **shareable review reports** — one self-contained HTML file with charts, search and thread-by-thread reading, that opens with no internet connection.
 
-New in v1.4: **compare two review cycles.** Hand it the version you read last week and the one that came back today, and it tells you what is new, what got closed, and what came back open.
+v1.4 added **comparing two review cycles** — hand it the version you read last week and the one that came back today, and it tells you what is new, what got closed, and what came back open.
 
-[![Tests](https://img.shields.io/badge/tests-463%20passing-brightgreen)](#testing)
+New in v1.5: **hand the review to a language model — without handing over the people in it.** Model-ready records with real document context, six prompt builders, retrieval documents for RAG, and a redaction layer that masks names, credentials and identifiers *before* anything leaves the machine, then puts the names back into the model's answer.
+
+[![Tests](https://img.shields.io/badge/tests-744%20passing-brightgreen)](#testing)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue)](#building-the-shared-library-with-cmake)
 [![Python ≥ 3.9](https://img.shields.io/badge/python-%E2%89%A53.9-blue)](#quick-start--python)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](#license)
@@ -18,24 +20,27 @@ New in v1.4: **compare two review cycles.** Hand it the version you read last we
 ## Table of Contents
 
 1. [What it does](#what-it-does)
-2. [What's new in v1.4](#whats-new-in-v14)
-3. [What's new in v1.3](#whats-new-in-v13)
-4. [What's new in v1.2](#whats-new-in-v12)
-5. [Quick start — Python](#quick-start--python)
-6. [Quick start — command line](#quick-start--command-line)
-7. [Quick start — C++](#quick-start--c)
-8. [Installation](#installation)
-9. [Exporting comments](#exporting-comments)
-10. [Review reports](#review-reports)
-11. [Comparing review cycles](#comparing-review-cycles)
-12. [Command-line guide](#command-line-guide)
-13. [Python API reference](#python-api-reference)
-14. [C++ API reference](#c-api-reference)
-15. [Architecture](#architecture)
-16. [Performance](#performance)
-17. [Testing](#testing)
-18. [Changelog](#changelog)
-19. [License](#license)
+2. [What's new in v1.5](#whats-new-in-v15)
+3. [What's new in v1.4](#whats-new-in-v14)
+4. [What's new in v1.3](#whats-new-in-v13)
+5. [What's new in v1.2](#whats-new-in-v12)
+6. [Quick start — Python](#quick-start--python)
+7. [Quick start — command line](#quick-start--command-line)
+8. [Quick start — C++](#quick-start--c)
+9. [Installation](#installation)
+10. [Exporting comments](#exporting-comments)
+11. [Review reports](#review-reports)
+12. [Comparing review cycles](#comparing-review-cycles)
+13. [Preparing a review for a language model](#preparing-a-review-for-a-language-model)
+14. [Masking private information](#masking-private-information)
+15. [Command-line guide](#command-line-guide)
+16. [Python API reference](#python-api-reference)
+17. [C++ API reference](#c-api-reference)
+18. [Architecture](#architecture)
+19. [Performance](#performance)
+20. [Testing](#testing)
+21. [Changelog](#changelog)
+22. [License](#license)
 
 ---
 
@@ -59,6 +64,110 @@ A `.docx` file is a ZIP archive containing XML parts defined by the OOXML standa
 - Anchoring: `referenced_text` — the exact document text the comment is attached to
 - Threading: `is_reply`, `parent_id`, `replies` list, `thread_ids` chain
 - Resolution: `done` flag from `commentsExtended.xml`
+
+**What the Python layers build on top of that:** tabular exports (v1.2), shareable review reports (v1.3), a comparison engine for two review cycles (v1.4), and — new in v1.5 — model-ready records with document context, a rule-based classifier, prompt builders, and a redaction layer that masks names and identifiers before an export leaves the machine. Every one of them resolves on first use, so a program that only parses documents pays for none of it.
+
+---
+
+## What's new in v1.5
+
+Everything from v1.4 still works exactly as before. v1.5 adds two things that belong together: **it can hand the review to a language model, and it can do that without handing over the people in it.**
+
+### The export a model can actually use
+
+```python
+records = parser.to_llm_dataset()
+```
+
+```python
+{
+  "comment_id": 4,
+  "author": "Dave Architect",
+  "context_before": "Section 5 describes data handling obligations under applicable law.",
+  "referenced_text": "Records are retained for seven years.",
+  "context_after": "Deletion requests are processed within 30 days.",
+  "comment": "Why seven years? GDPR needs a documented lawful basis for that.",
+  "thread": [...],
+  "category": "Compliance",
+  "priority": "high",
+  "intent": "question",
+  "action_required": true
+}
+```
+
+Three of those fields are the whole point.
+
+**`context_before` and `context_after` are real document text.** A comment on its own is usually unreadable — *"this is wrong"* means nothing. The parser knows the passage a comment is anchored to; the sentences either side of it live in `word/document.xml`, which the C++ core reads for anchors and then discards. v1.5 reads it back, in Python, on demand and cached per document, so a model sees the comment *in the document* rather than as a fragment.
+
+**`thread` travels with every comment in it.** Redundant on purpose: a retrieval system pulls back single records, and a record that cannot see the reply that resolved it will report an answered question as open.
+
+**`category`, `priority`, `intent` and `action_required` arrive already computed.** Rule-based, local, microseconds, and every decision explains itself by naming the words that drove it. It means a prompt can say *"here are the 12 compliance comments"* instead of spending its budget rediscovering that.
+
+### Masking the people first
+
+```python
+records = parser.to_llm_dataset(anonymize="strict")
+```
+
+```
+Alice Tester   →  person-71e9b0
+"Mail bob.reviewer@acme.example, key AKIAIOSFODNN7EXAMPLE, call +44 20 7946 0958."
+               →  "Mail [EMAIL], key [API_KEY], call [PHONE]."
+```
+
+A `.docx` review is one of the most personal artefacts a company holds: every comment carries a named human, an opinion, a timestamp, and — genuinely, routinely — a key someone pasted in and forgot. Sending that to a hosted model is a disclosure, and *"we only sent the comments"* is not a defence.
+
+So the redaction is real rather than decorative:
+
+- **Checksum-validated, not shape-matched.** A sixteen-digit number is not a credit card; one that passes Luhn probably is. An IBAN has to pass mod-97. That is what keeps a redactor from mangling every build number in a document until people stop trusting it.
+- **Names come from the document, not from a gazetteer.** The reviewers are known exactly — the parser read them out of the file — so recall on the people who matter is total, and a section about a *Mark* is not redacted because someone called Mark reviewed it.
+- **One person, one stand-in, everywhere.** `Alice`, `alice tester`, `@alice` and the author column all become the same `Reviewer 1`, so *"Reviewer 1 raised this three times and Reviewer 2 disagreed"* is still a sentence the model can produce.
+- **The output is checked.** After redacting, the result is scanned again with the same detectors, and anything still matching is reported. A redactor that cannot tell you whether it worked is one that will quietly stop working.
+
+And because the mapping stays on your machine, the model's *answer* can be turned back:
+
+```python
+dataset = parser.to_llm_records(anonymize="strict")
+answer  = ask_your_model(dataset)                 # sees "person-71e9b0"
+print(dataset.anonymizer.deanonymize(answer))     # you see "Alice Tester"
+```
+
+Five presets — `names_only`, `balanced`, `secrets_only`, `strict`, `gdpr` — and per-entity control over whether each kind is pseudonymised, redacted, masked, hashed, removed or kept.
+
+### Prompts that pack the corpus for you
+
+The hard part of asking a model about a review is not the wording; it is which comments fit, in what order, with what context, serialised so the answer can be joined back to real comment ids. That is the part this library knows:
+
+```python
+from docx_comment_parser.llm import create_action_items_prompt
+
+prompt = create_action_items_prompt(dataset.records)
+response = client.messages.create(**prompt.to_anthropic(), max_tokens=4096)
+```
+
+Six builders — `summary`, `action_items`, `resolution`, `triage`, `risk`, and `diff_summary`, which takes a v1.4 `DiffResult` directly. Each one asks for a named JSON schema, requires every claim to cite a comment id, and says out loud when the corpus did not fit rather than presenting a truncated review as a complete one.
+
+Nothing is sent anywhere. There is no client, no key, no network call in this package — the builders return strings.
+
+### And the rest
+
+```python
+parser.to_embeddings_input()        # one retrieval document per thread, for RAG
+parser.export_jsonl("review.jsonl") # the format every batch API takes
+parser.to_llm_chunks(max_tokens=100_000)  # never splits a thread in half
+parser.privacy_scan()               # what is in here, changing nothing
+```
+
+From a terminal:
+
+```bash
+docx-comments llm spec.docx --anonymize strict -o review.jsonl
+docx-comments prompt spec.docx --kind risk
+docx-comments classify spec.docx --priority blocker
+docx-comments anonymize contract.docx --scan --fail-on-secret   # a CI gate
+```
+
+**Nothing got heavier.** The base install still has zero dependencies — the context reader, the classifier and the whole privacy layer are standard library only. Token counting uses `tiktoken` if you have it and a calibrated estimate that errs high if you do not. Importing the library loads neither layer. The parser is untouched and just as fast; see [Performance](#performance).
 
 ---
 
@@ -266,6 +375,35 @@ security = df[df["text"].str.contains("security", case=False)]
 
 ---
 
+### …or hand it to a model, with the people masked
+
+```python
+# Model-ready records: comment, the document text either side of it, its thread,
+# and a rule-based category / priority / intent — with names and credentials
+# replaced before any record exists.
+records = parser.to_llm_dataset(anonymize="strict")
+
+# Or a prompt, packed to a token budget, that cites comment ids in its answer.
+from docx_comment_parser.llm import create_action_items_prompt
+
+dataset = parser.to_llm_records(anonymize="strict")
+prompt = create_action_items_prompt(dataset.records)
+answer = your_model(**prompt.to_anthropic())         # nothing is sent from here
+
+# The mapping stayed on this machine, so the names come back.
+print(dataset.anonymizer.deanonymize(answer))
+```
+
+Check what is in a document before any of that:
+
+```python
+scan = parser.privacy_scan()          # changes nothing
+if scan.has_secrets:
+    raise SystemExit(scan.summary())  # a key pasted into a comment, most likely
+```
+
+---
+
 ## Quick start — command line
 
 Install the CLI extra once:
@@ -306,6 +444,15 @@ docx-comments parse report.docx --contains security
 
 # Turn a folder of documents into one spreadsheet
 docx-comments batch ./reviews -o all_comments.csv
+
+# Categorise every comment by subject, urgency and what it asks for
+docx-comments classify report.docx --priority blocker
+
+# Check a document for anything private before it goes anywhere
+docx-comments anonymize report.docx --scan
+
+# Model-ready records, with the names and credentials masked first
+docx-comments llm report.docx --anonymize strict -o review.jsonl
 ```
 
 The full command reference is in the [Command-line guide](#command-line-guide).
@@ -351,22 +498,26 @@ pip install "docx-comment-parser[polars]"    # + to_polars()
 pip install "docx-comment-parser[cli]"       # + the docx-comments command
 pip install "docx-comment-parser[report]"    # + export_html_report()
 pip install "docx-comment-parser[diff]"      # + faster compare_comments()
+pip install "docx-comment-parser[llm]"       # + exact token counting for LLM chunking
 pip install "docx-comment-parser[all]"       # everything above
 ```
 
 | Extra | Adds | Gives you |
 |---|---|---|
-| *(none)* | — | `DocxParser`, `BatchParser`, `export_csv()`, `export_json()`, `to_dict()`, `to_json()`, `export_markdown_report()`, `compare_comments()` |
+| *(none)* | — | `DocxParser`, `BatchParser`, `export_csv()`, `export_json()`, `to_dict()`, `to_json()`, `export_markdown_report()`, `compare_comments()`, `to_llm_dataset()`, `export_jsonl()`, `to_embeddings_input()`, the prompt builders, and the **whole privacy layer** |
 | `pandas` | pandas ≥ 2.0 | `to_dataframe()` |
 | `polars` | polars ≥ 1.0 | `to_polars()` |
 | `cli` | typer, rich | the `docx-comments` terminal command |
 | `report` | jinja2 ≥ 3.0 | `export_html_report()`, `DiffResult.export_html()` |
 | `diff` | rapidfuzz ≥ 3.0 | roughly 3× faster fuzzy matching in `compare_comments()` |
+| `llm` | tiktoken ≥ 0.7 | exact token counts in `to_llm_chunks()` and prompt budgets |
 | `all` | all of the above | everything |
 
 The **Markdown** report deliberately needs no extra, exactly like CSV and JSON. Only the interactive HTML report needs `[report]`.
 
-`[diff]` is the one extra that is purely about speed. `compare_comments()` works without it — it falls back to `difflib` from the standard library and reaches the same decisions, just slower on the comments that need fuzzy matching. `result.similarity_backend` tells you which engine ran.
+**The LLM and privacy layers need no extras at all.** That is deliberate and it is the point: a redaction layer you have to install something to get is a redaction layer people skip. Context extraction uses `zipfile` and `xml.etree`, the classifier and every detector use `re`, and there are **no AI dependencies anywhere in this package** — nothing here sends anything to anyone.
+
+`[llm]` and `[diff]` are the two extras that are purely about speed. `compare_comments()` works without `rapidfuzz` — it falls back to `difflib` from the standard library and reaches the same decisions, just slower on the comments that need fuzzy matching; `result.similarity_backend` tells you which engine ran. Chunking works without `tiktoken` — it uses a calibrated estimate that deliberately errs high, because under-counting produces a request the provider rejects while over-counting produces one chunk more than strictly necessary; `docx_comment_parser.llm.token_backend()` tells you which counter ran.
 
 If you call a method whose extra is missing, you get a message telling you exactly what to install rather than an obscure `ImportError`:
 
@@ -902,6 +1053,352 @@ result = compare_comments(a, b, generated_at=datetime(2026, 3, 1, tzinfo=timezon
 
 ---
 
+## Preparing a review for a language model
+
+### The idea
+
+Everything up to here answers *what is in this document*. This section answers the question after it: **what do I send to a model, and in what shape, so that the answer is worth reading.**
+
+```python
+import docx_comment_parser as dcp
+
+parser = dcp.DocxParser()
+parser.parse("contract_review.docx")
+
+records = parser.to_llm_dataset()
+```
+
+One record per comment. No dependencies, no network, nothing sent anywhere.
+
+### What is in a record
+
+| Field | What it is |
+|---|---|
+| `comment_id` | `w:id` of the comment |
+| `author` | Who wrote it — or their stand-in, when anonymised |
+| `context_before` | Document text immediately before the anchor |
+| `referenced_text` | The passage the comment is attached to |
+| `context_after` | Document text immediately after the anchor |
+| `comment` | The comment body |
+| `thread` | Every comment in this one's conversation, oldest first |
+| `thread_id` | Root comment id — the stable identity of the conversation |
+| `parent_id`, `is_reply`, `thread_depth` | Position in the thread |
+| `resolved` | Whether it is marked done |
+| `date` | ISO-8601 |
+| `document`, `paragraph_style` | Where it came from |
+| `category` | Grammar, Editorial, Technical, Design, Compliance, Legal, Security, Requirements, Other |
+| `category_confidence` | 0.0–1.0; the winning category's share of the evidence |
+| `intent` | question, change_request, suggestion, objection, approval, information |
+| `priority` | blocker, high, medium, low |
+| `action_required` | Whether the comment asks the author to do something |
+
+Plain JSON-safe types throughout — no nesting beyond the thread list, dates as strings, `None` only where the schema means "no parent". A pipeline can consume it without a custom decoder.
+
+### Context windows
+
+The window either side of the anchor is what turns a fragment into a question with an answer:
+
+```python
+records = parser.to_llm_dataset(chars_before=500, chars_after=500)
+```
+
+The text is read back out of `word/document.xml` — the real body text, not a paraphrase of the anchor. Some details worth knowing:
+
+- Windows are trimmed to whole words, so a prompt never opens mid-token.
+- Tracked deletions are excluded and field codes are skipped: a model should see the document as it stands, not as it was, and `PAGEREF _Toc12345` is not prose.
+- Table cells are included — a comment on a cell gets the cell's text.
+- A comment with no anchor range (a reply, usually) gets an empty window rather than a wrong one.
+
+Reading the body costs one pass per **document**, not per comment, however many comments there are. If the `.docx` files are not on this machine, or the anchors alone are enough:
+
+```python
+records = parser.to_llm_dataset(include_context=False)   # skips the read entirely
+```
+
+A missing or corrupt source file is not an error here — the records come back without context. An enrichment must never take down an export that would otherwise have worked.
+
+### Classification
+
+The category, intent and priority are computed by weighted term matching, locally, in microseconds. It is rule-based on purpose: a review corpus is small and private, and a classifier that explains every decision by naming the words that drove it is worth more in this position than one that is marginally more accurate and requires an API key.
+
+```python
+from docx_comment_parser.llm import classify_text
+
+result = classify_text("Why seven years? GDPR needs a documented lawful basis "
+                       "for this retention period.")
+
+result.category          # Category.COMPLIANCE
+result.confidence        # 1.0
+result.intent            # Intent.QUESTION
+result.priority          # Priority.HIGH
+result.action_required   # True
+result.matched           # ('GDPR', 'lawful basis')
+```
+
+Three properties are worth relying on:
+
+- **A comment that matches nothing is `Other` with zero confidence**, not the least-bad of eight guesses. `result.is_confident` is the flag to filter on.
+- **Repetition is not evidence.** A term contributes its weight once however often it appears, so a long comment cannot dominate an aggregate by saying "security" four times.
+- **Security, legal and compliance comments are high priority even when phrased calmly.** Those are the ones that become incidents when they are triaged as ordinary edits.
+
+The anchored text is scored at half weight — it tells you what a comment is *near*, which is a real signal but a weaker one than what the comment says. "Add a citation" is editorial; the same words on a liability clause lean legal.
+
+### Retrieval documents for RAG
+
+```python
+documents = parser.to_embeddings_input()
+```
+
+```python
+{
+  "id": "contract.docx#thread-4",
+  "text": "Dave Architect: Why seven years? GDPR needs a documented lawful basis.\nAnchored to: \"Records are retained for seven years.\"\nDocument context: ...",
+  "metadata": {"thread_id": 4, "author": "...", "category": "Compliance",
+               "priority": "high", "resolved": false, "thread_size": 3, ...}
+}
+```
+
+The shape every vector store accepts and none of them make you reshape. One document per **thread** by default — a reply saying "agreed, fixed" is meaningless as a retrieval hit on its own, and a thread is still short enough to embed whole. Pass `granularity="comment"` for a corpus of long standalone comments where thread-level chunks would blur several issues together.
+
+Metadata is scalars only, so every field is filterable.
+
+### JSONL
+
+```python
+parser.export_jsonl("review.jsonl")
+```
+
+One object per line, no wrapper array — the format every batch and fine-tuning API takes, and the one that streams. Written line by line, so a 10,000-comment export never materialises its own serialisation in memory alongside the records.
+
+### Chunking
+
+```python
+chunks = parser.to_llm_chunks(max_tokens=100_000)
+
+for chunk in chunks:
+    print(f"part {chunk.index + 1} of {chunk.total}: "
+          f"{len(chunk.records)} comments, ~{chunk.tokens} tokens")
+```
+
+Bin-packing with one hard constraint: **a thread is never split.** A thread cut across two requests gives the model a reply with no comment above it in one call and a question with no answer in the other, and it will confidently summarise both wrong. A thread larger than the budget on its own comes back as one over-budget chunk rather than silently cut — `chunk.tokens` lets you detect that and decide.
+
+`chunk.to_text()` renders the batch compactly: roughly a third fewer tokens than the same records as JSON, because every key is written once as a label rather than once per record. Use JSON when the model has to echo the structure back, and text when it only has to read it.
+
+Token counting is exact under `tiktoken` and estimated without it. The estimate deliberately errs high.
+
+### Prompt builders
+
+```python
+from docx_comment_parser.llm import (
+    create_review_summary_prompt,
+    create_action_items_prompt,
+    create_resolution_prompt,
+    create_triage_prompt,
+    create_risk_prompt,
+    create_diff_summary_prompt,
+)
+
+prompt = create_action_items_prompt(parser.to_llm_records())
+
+prompt.system      # the system message
+prompt.user        # the packed corpus and the output schema
+prompt.included    # comment ids that fitted
+prompt.omitted     # how many did not
+prompt.tokens      # estimated size of the whole thing
+```
+
+| Builder | Asks |
+|---|---|
+| `create_review_summary_prompt` | What is this review about, where does it stand, what is contested |
+| `create_action_items_prompt` | What has to be done, by whom, in what order |
+| `create_resolution_prompt` | For each open thread: the replacement text, and the reply that closes it |
+| `create_triage_prompt` | Only the comments the rules could not place confidently |
+| `create_risk_prompt` | What could hurt if this ships, and what evidence would settle it |
+| `create_diff_summary_prompt` | Takes a v1.4 `DiffResult`: is this converging, what is stuck |
+
+Three conventions run through all of them:
+
+- **JSON out, with a named schema.** A summary a human reads is worth less than one a program can join back to the document.
+- **Every claim cites a comment id.** An action item that cannot be traced to the comment that motivated it is a rumour.
+- **What did not fit is stated in the prompt.** A truncated corpus is never presented as a complete review.
+
+Sending is your business:
+
+```python
+# Anthropic
+response = client.messages.create(**prompt.to_anthropic(), model="claude-opus-4-5", max_tokens=4096)
+
+# OpenAI-shaped
+response = client.chat.completions.create(messages=prompt.to_messages(), model="...")
+```
+
+`create_action_items_prompt` drops resolved threads and sorts blockers first before packing, so a corpus that overflows loses the chatter rather than the work. `create_triage_prompt` sends *only* the low-confidence comments — sending the whole corpus to re-derive what the rules already got right would be waste.
+
+---
+
+## Masking private information
+
+### The idea
+
+```python
+from docx_comment_parser import anonymize_comments
+
+clean, report = anonymize_comments(parser.to_comments(), "strict")
+print(report.summary())
+```
+
+```
+Anonymisation — strict policy
+
+  Comments          142
+  Fields changed    318
+  Replacements      207
+  Pseudonyms        6
+
+    PERSON       181
+    EMAIL          9
+    PHONE          7
+    URL            4
+    API_KEY        3
+    CREDIT_CARD    2
+    FILE_PATH      1
+
+  Verified          nothing detectable remains
+```
+
+Or in one step, on the way out:
+
+```python
+records = parser.to_llm_dataset(anonymize="strict")
+```
+
+Anonymisation runs **before** any record is built, so there is no window in which a record object holds real names and no path where somebody exports first and redacts later.
+
+### What it finds
+
+| Group | Types | How |
+|---|---|---|
+| People | `PERSON`, `USERNAME` | The document's own reviewer roster, plus `@handle` mentions |
+| Contact | `EMAIL`, `PHONE` | Pattern; phone numbers validated by digit count and separator style |
+| Financial / government | `CREDIT_CARD`, `IBAN`, `SSN`, `NATIONAL_ID`, `PASSPORT` | **Luhn** and **mod-97** checksums; SSA issuance rules |
+| Credentials | `API_KEY`, `JWT`, `PRIVATE_KEY`, `SECRET` | AWS, GitHub, Slack, OpenAI, Google shapes; PEM blocks; keyword-introduced values |
+| Technical | `IP_ADDRESS`, `MAC_ADDRESS`, `URL`, `FILE_PATH` | Octet-validated IPv4, IPv6, home-directory paths only |
+| Contextual | `DATE_OF_BIRTH`, `ORGANIZATION`, `LOCATION`, `CUSTOM` | Keyword-anchored, or from your own term list |
+
+Two decisions run through all of it.
+
+**Validate, do not just match.** A sixteen-digit number is not a credit card; one that passes Luhn probably is. `Order 1234567890123456` survives untouched and `4111 1111 1111 1111` does not. `Version 1.2.3` is not a phone number. Only file paths that carry a *home directory* are redacted — `/var/log/app.log` identifies nobody, and blanking it would destroy a useful technical comment while protecting no one.
+
+**Names come from the document.** A shipped list of first names is both enormous and wrong: it misses `Νίκος` and it redacts a section about a `Mark`. The reviewers of a document are known exactly, so the name detector is built from that roster. Name parts that are also ordinary English words only match when capitalised.
+
+### Strategies
+
+| Strategy | Result | When |
+|---|---|---|
+| `PSEUDONYMIZE` | `Reviewer 1`, `person-4f2a91` | People — the model can still follow who said what |
+| `REDACT` | `[EMAIL]` | Identifiers: the model knows one was there without learning it |
+| `MASK` | `**** **** **** 1111` | When a human still has to recognise the value |
+| `HASH` | `EMAIL_9f2ab41c` | Joins across documents without the value travelling |
+| `REMOVE` | *(deleted)* | |
+| `KEEP` | unchanged | Switching one type back on inside a strict policy |
+
+**Credentials are never pseudonymised or masked by any preset**, and a policy that asks for it is upgraded to `REDACT`. A partially visible API key is still a leaked API key.
+
+### Presets
+
+| Preset | What it does |
+|---|---|
+| `names_only` | People, handles and email addresses. Technical and financial content untouched. |
+| `balanced` *(default)* | People become `Reviewer N`; identifiers and credentials are redacted; URLs kept. |
+| `secrets_only` | Credentials and financial identifiers only — names stay readable. |
+| `strict` | Everything identifying, including file names and URLs, down to a low confidence floor, with opaque token pseudonyms. |
+| `gdpr` | Pseudonymisation in the sense Article 4(5) uses the word: personal data replaced with stand-ins that cannot be attributed without the mapping, and the mapping held separately. |
+
+Any preset can be adjusted rather than replaced:
+
+```python
+from docx_comment_parser.privacy import AnonymizationPolicy, EntityType, Strategy
+
+policy = AnonymizationPolicy.balanced().with_(
+    redact_document_name=True,
+    custom_terms=("Project Falcon", "Northwind Traders"),
+    custom_patterns=(("customer-id", r"CUST-\d{6}"),),
+    extra_names=("Dave Architect",),          # named in comments, never commented
+    strategies={EntityType.URL: Strategy.REDACT},
+    min_score=0.4,
+)
+```
+
+### Consistency, and getting the names back
+
+Every spelling of one person maps to one stand-in, in every field of every comment. Without that, a model reading the output cannot tell that two comments came from the same reviewer, and the export loses the thing review analysis is *for*.
+
+The mapping — the **vault** — never leaves the process unless you write it out:
+
+```python
+from docx_comment_parser.privacy import Anonymizer
+
+engine = Anonymizer("balanced", names=[c.author for c in comments])
+clean, report = anonymize_comments(comments, anonymizer=engine)
+
+answer = ask_your_model(clean)                  # the model sees "Reviewer 1"
+print(engine.deanonymize(answer))               # you see "Alice Tester"
+```
+
+That round trip is what makes anonymisation practical rather than merely virtuous: send stand-ins, get an analysis back, restore the names locally before a human reads it. Redacted and hashed values are **not** reversible, by design.
+
+Reuse one `Anonymizer` across several documents and a reviewer who appears in three of them gets one stand-in rather than three. `BatchParser.anonymize()` does this for a whole folder.
+
+Writing the vault to disk is a separate, explicitly named call, because a vault sitting beside its own anonymised export is the original data with an extra step:
+
+```python
+engine.vault.export("vault.json")   # created 0600 on POSIX, before anything is written
+```
+
+Pseudonym tokens are derived with HMAC-SHA256 under a key that is **random per `Anonymizer`** unless you supply one. That is the safe default — a token stable across everything you have ever exported is itself a persistent identifier. Pass `key=` when you deliberately want stability across runs, and treat that key as a secret.
+
+### Verification, and the pre-flight check
+
+After replacing, the output is scanned again with the same detectors:
+
+```python
+report.clean        # False means something got through
+report.residual     # what, and which detector found it
+```
+
+A redactor that cannot tell you whether it worked is a redactor that will one day quietly stop working. Set `verify=False` if you have measured that you need the time back.
+
+Before anything leaves the machine at all:
+
+```python
+scan = parser.privacy_scan()
+print(scan.summary())
+
+if scan.has_secrets:
+    raise SystemExit("credential in a review comment — not exporting")
+```
+
+`privacy_scan()` changes nothing. Its report carries type and length only, never a value, so the scan result is itself safe to paste into a ticket. The `llm` and `prompt` CLI commands run it automatically and warn on standard error when you export without redacting.
+
+### Extending it
+
+Any object with a `find(text)` yielding spans is a detector, so a Presidio analyzer, a spaCy NER model or an internal customer-id format plugs in without changing anything here:
+
+```python
+from docx_comment_parser.privacy import (
+    Anonymizer, EntityType, RegexRecognizer, default_recognizers,
+)
+
+engine = Anonymizer("strict", recognizers=[
+    *default_recognizers(names=roster),
+    RegexRecognizer("ticket", EntityType.CUSTOM, r"JIRA-\d+"),
+])
+```
+
+Overlapping detections are resolved before anything is replaced: longest span wins, then specificity, then confidence — never recognizer registration order. That rule is what stops the `alice` inside `alice@acme.example` from being replaced on its own, which would hide the person and publish the employer.
+
+---
+
 ## Command-line guide
 
 Install with `pip install "docx-comment-parser[cli]"`, then run `docx-comments --help`. Every command has its own `--help` too.
@@ -1045,6 +1542,107 @@ docx-comments diff last_signed_off.docx current.docx --fail-on-open \
   || echo "Still open items — see the table above"
 ```
 
+### `llm` — model-ready records
+
+```bash
+docx-comments llm spec.docx                                  # JSON to stdout
+docx-comments llm spec.docx -o review.jsonl                  # JSON Lines
+docx-comments llm spec.docx --anonymize strict -o clean.jsonl
+docx-comments llm spec.docx --embeddings -o vectors.json     # retrieval documents
+docx-comments llm spec.docx --no-context --jsonl | jq '.category'
+```
+
+Writes the records described in [Preparing a review for a language model](#preparing-a-review-for-a-language-model). `.jsonl` output is inferred from the extension or forced with `--jsonl`.
+
+**Without `--anonymize` it scans the export and warns on standard error:**
+
+```
+Privacy: 5 finding(s) in this export (API_KEY x1, EMAIL x1, PERSON x1, PHONE x1,
+URL x1). Re-run with --anonymize strict to redact them.
+```
+
+The warning goes to stderr, so it appears on your terminal and never in the file you piped to. The export still happens — this is a warning, not a refusal — but a credential going to a model provider's logs without a word on the terminal would be indefensible.
+
+| Flag | Meaning |
+|---|---|
+| `--anonymize`, `-A` | `balanced`, `strict`, `names-only`, `secrets-only`, `gdpr` |
+| `--vault PATH` | Write the pseudonym mapping (mode 0600). Store it separately. |
+| `--before N`, `--after N` | Context window widths (default 500 each) |
+| `--no-context` | Skip reading the document body — faster, no `context_*` fields |
+| `--no-threads` | Do not carry the thread on every record |
+| `--embeddings` | Emit `{id, text, metadata}` retrieval documents |
+| `--granularity` | For `--embeddings`: `thread` (default) or `comment` |
+| `--jsonl`, `--indent` | Output format |
+
+The usual `--author`, `--contains`, `--resolved`/`--unresolved` and `--threads-only` filters apply.
+
+### `prompt` — a ready-to-send prompt
+
+```bash
+docx-comments prompt spec.docx --kind action-items
+docx-comments prompt spec.docx --kind risk --anonymize strict
+docx-comments prompt spec.docx --kind summary --json -o prompt.json
+```
+
+`--kind` is one of `summary`, `action-items`, `resolution`, `triage`, `risk`. Prints the system message, a rule, then the user message; `--json` emits `{kind, system, user, included, omitted, tokens}` instead.
+
+`--budget N` sets the token budget for the packed comments. When the corpus does not fit, the prompt says so and the command notes it on stderr.
+
+This command has no network access and no API key. It prints a prompt; sending it is your business.
+
+### `classify` — categorise without a model
+
+```bash
+docx-comments classify spec.docx
+docx-comments classify spec.docx --priority blocker
+docx-comments classify spec.docx --category security --actions-only
+```
+
+```
+       Categories
+┌────────────┬──────────┐
+│ Category   │ Comments │
+├────────────┼──────────┤
+│ Legal      │        2 │
+│ Compliance │        1 │
+│ Grammar    │        1 │
+│ Security   │        1 │
+└────────────┴──────────┘
+┌────┬────────────────┬────────────┬──────────┬────────────────┬──────────────┐
+│ ID │ Author         │ Category   │ Priority │ Intent         │ Comment      │
+├────┼────────────────┼────────────┼──────────┼────────────────┼──────────────┤
+│  2 │ Alice Tester   │ Security   │ blocker  │ objection      │ The API key… │
+│  0 │ Alice Tester   │ Legal      │ high     │ change request │ This clause… │
+└────┴────────────────┴────────────┴──────────┴────────────────┴──────────────┘
+```
+
+Instant and entirely local. `--actions-only` keeps just the comments that ask for something.
+
+### `anonymize` — mask names and identifiers
+
+```bash
+docx-comments anonymize contract.docx --scan                  # report only
+docx-comments anonymize contract.docx -p strict -o clean.json
+docx-comments anonymize contract.docx -p balanced --vault vault.json
+docx-comments anonymize contract.docx --scan --fail-on-secret # a CI gate
+```
+
+`--scan` changes nothing and prints what is there:
+
+```
+┌──────────────────────── Privacy scan ─────────────────────────┐
+│ Privacy scan — 5 finding(s) across 5 comment(s)               │
+│                                                               │
+│     API_KEY  1   e.g. <20 chars>                              │
+│     EMAIL    1   e.g. <18 chars>                              │
+│     PERSON   1   e.g. <5 chars>                               │
+│                                                               │
+│   A credential was detected. Do not export without redacting. │
+└───────────────────────────────────────────────────────────────┘
+```
+
+`-o` writes the redacted comments as `.json` or `.csv`, chosen by extension. `--fail-on-secret` exits `1` when a credential is found, which makes the command a pre-commit or CI check on documents entering a repository. The command also exits `1` if verification finds anything still detectable after redacting.
+
 ### `batch` — a whole folder
 
 ```bash
@@ -1060,7 +1658,7 @@ Prints one row per file, then a total. Word's `~$name.docx` lock files are ignor
 
 ### Filters
 
-`--author`, `--contains`, `--resolved`, `--unresolved` and `--threads-only` work the same way on `parse`, `export` and `batch`:
+`--author`, `--contains`, `--resolved`, `--unresolved` and `--threads-only` work the same way on `parse`, `export`, `batch`, `llm`, `prompt` and `classify`:
 
 | Flag | Meaning |
 |---|---|
@@ -1078,7 +1676,7 @@ Prints one row per file, then a total. Word's `~$name.docx` lock files are ignor
 | Code | Meaning |
 |---|---|
 | `0` | Success |
-| `1` | The file could not be read, or `unresolved` found open comments, or `batch` hit an unreadable file, or `diff --fail-on-open` found open comments |
+| `1` | The file could not be read, or `unresolved` found open comments, or `batch` hit an unreadable file, or `diff --fail-on-open` found open comments, or `anonymize --fail-on-secret` found a credential, or redaction left something detectable |
 | `2` | The command line itself was wrong |
 
 ---
@@ -1223,7 +1821,98 @@ parser.export_markdown_report("review.md")     # text to paste anywhere
 
 `BatchParser` has the same four methods. They combine every parsed file into one report and take an extra optional `file_paths` argument to restrict it.
 
+#### LLM and privacy methods
+
+Added in v1.5. See [Preparing a review for a language model](#preparing-a-review-for-a-language-model) and [Masking private information](#masking-private-information).
+
+| Method | Returns | Needs |
+|---|---|---|
+| `to_llm_dataset(chars_before=500, chars_after=500, **kwargs)` | `list[dict]` | — |
+| `to_llm_records(...)` | `LLMDataset` | — |
+| `to_jsonl(**kwargs)` | `str` | — |
+| `export_jsonl(path, **kwargs)` | `Path` written | — |
+| `to_embeddings_input(granularity="thread", **kwargs)` | `list[dict]` | — |
+| `to_llm_chunks(max_tokens=100_000, **kwargs)` | `list[Chunk]` | — |
+| `anonymize(policy=True, **kwargs)` | `(list[Comment], AnonymizationReport)` | — |
+| `privacy_scan()` | `PrivacyScan` | — |
+
+Keyword arguments shared by the dataset-building methods:
+
+| Argument | Default | Meaning |
+|---|---|---|
+| `chars_before`, `chars_after` | `500` | Context window widths; `0` skips the document read |
+| `include_context` | `True` | Read the document body at all |
+| `include_thread` | `True` | Carry the conversation on every record in it |
+| `classify` | `True` | Run the category / intent / priority pass |
+| `anonymize` | `None` | A policy, a preset name, or `True` |
+| `anonymizer` | `None` | Reuse an `Anonymizer` so several exports share stand-ins |
+| `documents` | `None` | `{document_name: path}` when the `.docx` files have moved |
+
+```python
+parser.parse("contract.docx")
+
+records = parser.to_llm_dataset(anonymize="strict")
+parser.export_jsonl("review.jsonl", chars_before=300, chars_after=300)
+
+scan = parser.privacy_scan()
+if scan.has_secrets:
+    raise SystemExit(scan.summary())
+```
+
+`BatchParser` has `to_llm_dataset`, `to_llm_records`, `export_jsonl`, `to_embeddings_input`, `anonymize` and `privacy_scan`, each taking an extra optional `file_paths` argument. A batch anonymised in one call shares one set of stand-ins across every document in it.
+
 ---
+
+### The `llm` package
+
+```python
+from docx_comment_parser.llm import (
+    build_dataset, to_embeddings_input, to_jsonl, export_jsonl,
+    classify_text, classify_comment, classify_comments, category_breakdown,
+    estimate_tokens, token_backend, chunk_records, chunk_texts,
+    DocumentContext, LLMRecord, LLMDataset, Chunk, Prompt,
+    Category, Intent, Priority, Classification,
+    create_review_summary_prompt, create_action_items_prompt,
+    create_resolution_prompt, create_triage_prompt, create_risk_prompt,
+    create_diff_summary_prompt,
+)
+```
+
+| Object | What it is |
+|---|---|
+| `LLMDataset` | The records, plus the anonymisation report and the vault. Iterable and indexable. |
+| `LLMRecord` | One comment with its context, thread and tags. `to_dict()`, `to_text()`. |
+| `Classification` | `category`, `confidence`, `scores`, `intent`, `priority`, `action_required`, `matched` |
+| `Chunk` | `index`, `total`, `records`, `tokens`, `threads`; `to_text()`, `to_json()` |
+| `Prompt` | `system`, `user`, `included`, `omitted`, `tokens`; `to_messages()`, `to_anthropic()` |
+| `DocumentContext` | Body text plus a character range per comment. `window()`, `anchor_text()`, `paragraph_text()` |
+
+### The `privacy` package
+
+```python
+from docx_comment_parser.privacy import (
+    anonymize_comments, scan_comments,
+    AnonymizationPolicy, Strategy, Anonymizer, Vault,
+    AnonymizationReport, PrivacyScan,
+    EntityType, Span, resolve_spans,
+    Recognizer, RegexRecognizer, NameRecognizer, TermRecognizer,
+    default_recognizers, luhn_valid, iban_valid,
+)
+```
+
+| Object | What it is |
+|---|---|
+| `anonymize_comments(comments, policy=True, *, anonymizer=None, key=None, verify=True)` | `(list[Comment], AnonymizationReport)` |
+| `scan_comments(comments, *, names=None, policy=True)` | `PrivacyScan` — changes nothing |
+| `AnonymizationPolicy` | Frozen config. `.balanced()`, `.strict()`, `.names_only()`, `.secrets_only()`, `.gdpr()`, `.with_(**changes)` |
+| `Anonymizer` | The engine. `scan()`, `anonymize_text()`, `anonymize()`, `audit()`, `deanonymize()`, `.vault` |
+| `Vault` | Stand-in → original. `to_dict()`, `export(path)`, `Vault.load(path)` |
+| `AnonymizationReport` | `clean`, `residual`, `entity_counts`, `replacements`, `pseudonyms`, `summary()`, `to_dict()` |
+| `PrivacyScan` | `total`, `findings`, `has_secrets`, `summary()`, `to_dict()` |
+| `Recognizer` | Base class. Subclass with `find(text)` to plug in your own detector. |
+
+---
+
 
 ### `BatchParser`
 
@@ -1692,6 +2381,17 @@ docx_comment_parser/
 │   │   ├── diff_report.py      ← summary, rows, CSV/JSON/DataFrame, MD, HTML
 │   │   ├── templates/          ← diff.html.j2
 │   │   └── assets/             ← diff.css, diff.js (layered on report.css)
+│   ├── llm/                    ← v1.5 model-ready export
+│   │   ├── context.py          ← reads document.xml back for context windows
+│   │   ├── classification.py   ← rule-based category / intent / priority
+│   │   ├── dataset.py          ← LLMRecord, JSONL, retrieval documents
+│   │   ├── chunking.py         ← token budgets; never splits a thread
+│   │   └── prompts.py          ← six builders, JSON schemas, id citations
+│   ├── privacy/                ← v1.5 detection and redaction
+│   │   ├── entities.py         ← entity types and overlap resolution
+│   │   ├── recognizers.py      ← detectors, checksums, the roster name matcher
+│   │   ├── policy.py           ← strategies and the five presets
+│   │   └── anonymizer.py       ← engine, local vault, verification pass
 │   └── _cli_app.py             ← Typer + Rich command line
 ├── tests/
 │   ├── CMakeLists.txt
@@ -1743,6 +2443,61 @@ ZipReader — memory-mapped — inflate one entry at a time
 ## Performance
 
 Parsing speed is the point of this library, so every release is measured against the last one to confirm the new features cost nothing.
+
+### Parser throughput — v1.4.0 vs v1.5.0
+
+v1.5 changed no C++ and touched no module on the parse path, so the honest way to measure it is to ask what the new layers cost a program that never calls them. Runs are interleaved in separate processes, with the `llm` and `privacy` packages hidden behind an import hook on the control side; each figure is the best of three rounds of seven.
+
+| | v1.5 layers unreachable | v1.5 layers present | Change |
+|---|---|---|---|
+| `import docx_comment_parser` | 55.23 ms | 55.42 ms | +0.3% |
+| `parse()` — 10,000 comments | 118.116 ms | 118.483 ms | +0.3% |
+
+Both columns ran the same compiled `_core`, so `parse()` is byte-identical machine code and +0.3% *is* this machine's measurement error. The import figure is the interesting one: it does not move because neither layer is imported. `import docx_comment_parser` leaves `docx_comment_parser.llm`, `docx_comment_parser.privacy`, `tiktoken` and even `xml.etree.ElementTree` out of `sys.modules`, and a test asserts it stays that way.
+
+### LLM export throughput
+
+Best of three, from parsed comments to the finished output. The document is the standard fixture: three authors, 40% replies, one anchor per comment.
+
+| Comments | `parse()` | `classify_comments()` | `to_llm_dataset()` no context | with 500/500 context | `to_embeddings_input()` | `export_jsonl()` | `.jsonl` size |
+|---|---|---|---|---|---|---|---|
+| 100 | 1.5 ms | 18.4 ms | 20.4 ms | 23.1 ms | 23.0 ms | 2.3 ms | 107 KB |
+| 1,000 | 11.9 ms | 192.9 ms | 230.3 ms | 256.1 ms | 213.4 ms | 13.6 ms | 1.1 MB |
+| 10,000 | 121.6 ms | 2,019.0 ms | 2,161.6 ms | 2,380.3 ms | 2,299.9 ms | 135.2 ms | 10.8 MB |
+
+Every column is linear — ten times the comments costs ten times the time, to within a few percent.
+
+**Classification is the cost**, at roughly 200 µs per comment, and it is the whole of the difference between the two dataset columns' baseline and their totals. It runs about forty regular expressions over each comment; that is the price of a decision that explains itself. Turn it off with `classify=False` when you only want the records.
+
+**Reading the document body costs almost nothing per comment.** Adding 500 characters of context on either side takes a 10,000-comment export from 2.16 s to 2.38 s — about 10%, and *all* of it is one pass over `word/document.xml`, not ten thousand. The body is parsed once per document and cached; the windows are slices of that one string, which is also why peak memory stays under 400 MB for a 10,000-comment export with full context (a test asserts it).
+
+### Chunking and token counting
+
+| Comments | `chunk_records()` at a 100k budget |
+|---|---|
+| 100 | 0.3 ms |
+| 1,000 | 3.4 ms |
+| 10,000 | 38.8 ms |
+
+Linear, and negligible against everything around it. These figures are with the standard-library estimate; `tiktoken` counts exactly and is slower per call, which is the trade the `[llm]` extra exists to let you make.
+
+### Anonymisation throughput
+
+| Comments | `scan_comments()` read-only | `balanced` | `strict` | `balanced`, `verify=False` |
+|---|---|---|---|---|
+| 100 | 6.8 ms | 18.0 ms | 19.3 ms | 8.9 ms |
+| 1,000 | 59.0 ms | 156.1 ms | 166.6 ms | 75.8 ms |
+| 10,000 | 636.2 ms | 1,599.0 ms | 1,723.1 ms | 787.6 ms |
+
+**Redacting 10,000 comments takes about 1.6 s** — roughly thirteen times what parsing them costs, and about the same as classifying them. Three things keep it there rather than an order of magnitude higher:
+
+- **Each detector declares the characters a match cannot exist without.** A comment with no `@` never runs the email pattern; one with no digit never runs Luhn. On ordinary review text that skips most of the work before a regex is compiled into a scan.
+- **Short repeated values are cached.** The author column repeats on every row of a large export; scanning it ten thousand times would double the figure above on its own.
+- **Overlap resolution is O(n log n) in the spans found**, not in the text, and a review comment holds a handful of spans.
+
+**Verification is a little over half the cost**, because it is a second scan of everything that changed. It is on by default and it should stay on: a redactor that cannot tell you whether it worked is a redactor that will one day quietly stop working. `verify=False` is there for a pipeline that has measured that it needs the 800 ms back.
+
+`scan_comments()` is cheaper than redacting because it only reads. That is what makes it usable as a pre-flight check on every export, including in CI.
 
 ### Parser throughput — v1.3.0 vs v1.4.0
 
@@ -1861,7 +2616,7 @@ These properties are asserted by the test suite, not just measured once — see 
 
 ## Testing
 
-There are two suites: the original C++ one and a Python one added in v1.2. Together they run **463 checks**.
+There are two suites: the original C++ one and a Python one added in v1.2. Together they run **744 checks**.
 
 ### Python suite
 
@@ -1872,7 +2627,7 @@ pytest -m "not perf"            # skip the slower performance tests
 pytest --cov=docx_comment_parser --cov-report=term-missing
 ```
 
-397 tests, **98% statement coverage** — above the 90% project target.
+678 tests, **97% statement coverage** — above the 90% project target.
 
 Like the C++ suite, it invents its own fixtures: `tests/python/conftest.py` builds genuine `.docx` packages with `zipfile` and hands them to the real parser. Nothing is mocked, and no sample documents need to exist on disk.
 
@@ -1885,6 +2640,8 @@ Like the C++ suite, it invents its own fixtures: `tests/python/conftest.py` buil
 | `test_cli.py` | Every command, flag, and exit code, through Typer's test runner |
 | `test_reporting.py` | Analytics arithmetic, SVG charts, HTML and Markdown output, and the security properties below |
 | `test_comparison.py` | Similarity, all three matching levels, change classification, velocity, hotspots, and every diff export |
+| `test_llm.py` | Context extraction from real OOXML, classification, records, embeddings, chunking, and every prompt builder |
+| `test_privacy.py` | Detectors and their checksums, span resolution, every strategy and preset, verification, and reversal |
 | `test_performance.py` | Scale and timing budgets (marked `perf`) |
 
 The comparison tests are built to defeat the matcher rather than to agree with it. Each level is exercised on a document constructed to be unmatchable by the level above it — renumbered ids to force anchor matching, reworded text *plus* renumbered ids to force fuzzy matching — and the case that matters most has the ids lining up while the comments behind them are strangers, where the required answer is one addition and one removal rather than one heavily edited comment. Two more are worth calling out:
@@ -1897,6 +2654,20 @@ Three of the reporting tests are worth calling out, because they check promises 
 - **It really is self-contained.** The generated HTML is scanned for any `src`/`href` pointing outside the file; the assertion is that there are none. It runs against both a 3-comment document and a 5,000-comment one.
 - **Document content cannot break the page.** A comment whose text is `</script><script>…` is written into a report, and the test asserts the file still contains exactly the two script tags the template opened — the comment's own text is escaped into inert JSON, and survives intact when decoded.
 - **The library stays lazy.** A subprocess imports the package and asserts that neither the reporting layer nor pandas appears in `sys.modules`.
+
+The v1.5 suites are written the same way — against the cases that make each layer quietly wrong rather than loudly broken.
+
+For **context extraction**, the fixtures are hand-written `document.xml` parts with known text at known positions, and the character offsets are asserted directly. A window read from the wrong offset produces a record that looks entirely plausible and quotes the wrong paragraph, and no downstream test would catch it. The cases covered are the ones that break a naive reader: an anchor split across several runs (which is what Word writes whenever formatting changes mid-selection), tracked deletions, field codes, table cells, a comment reference with no range, and a range whose end marker is missing.
+
+For **redaction**, the emphasis is on the ways one leaks while appearing to work:
+
+- **The inside of a match.** `bob.reviewer@acme.example` contains a name. An implementation that filters detections before resolving overlaps replaces the name and publishes the employer — so overlap resolution runs over *every* detection, including the ones the policy will not act on, and a test asserts the domain does not survive.
+- **A stand-in that collides with a real name.** A document reviewed by a Bob *Reviewer* must not have its people renamed to `Reviewer 1`; that reads as a real name and defeats the verification pass. The labels are checked against the document's own roster and fall through to `Person` when they clash.
+- **The checksum boundary.** `Order 1234567890123456` must survive and `4111 1111 1111 1111` must not; `Version 1.2.3` is not a phone number and `+44 20 7946 0958.` — full stop included — is.
+- **Consistency across fields.** A pseudonym that is stable in the comment text but different in the author column tells a reader exactly who it is.
+- **Reversal.** `Reviewer 1` must not eat the front of `Reviewer 11`, tested with twelve reviewers.
+
+The end-to-end privacy tests go through a genuine `.docx` and the real parser, and assert that no original value — name, address, key, card, path or Greek surname — appears anywhere in the output, with `report.clean` confirming the library's own verification agrees.
 
 The regression file is the important one: it exists specifically to prove that moving the compiled module into a package changed nothing a user can see. If it passes, upgrading is safe.
 
@@ -1966,6 +2737,87 @@ The test binary exits with code `0` on full pass, `1` on any failure.
 ---
 
 ## Changelog
+
+### v1.5.0 — LLM export, review intelligence, and masking the people first
+
+**Public API: backward compatible.** Existing code needs no changes; `test_core_regression.py` proves it, and the parser's C++ sources were not touched at all.
+
+#### New — `to_llm_dataset()`
+
+```python
+records = parser.to_llm_dataset(chars_before=500, chars_after=500)
+```
+
+One record per comment, in the schema the roadmap specifies, extended with the thread and the review-intelligence tags. Plain JSON-safe types throughout.
+
+- **`context_before` / `context_after` are real document text**, read back out of `word/document.xml` in Python, on demand, once per document however many comments there are. Windows trim to whole words; tracked deletions and field codes are excluded; table cells are included. A missing or corrupt source file yields records without context rather than an exception — an enrichment must not take down an export that would otherwise have worked.
+- **The thread travels with every comment in it**, redundantly and on purpose: a retrieval system pulls back single records, and a record that cannot see the reply that resolved it will report an answered question as open.
+- Also `to_llm_records()` (the object form, carrying the anonymisation report and the vault), `to_jsonl()`, `export_jsonl()`, `to_embeddings_input()` and `to_llm_chunks()`. `BatchParser` has the same, spanning every parsed file.
+
+#### New — rule-based classification
+
+`Category` (the roadmap's eight, plus `Other`), `Intent` and `Priority`, computed by weighted term matching in microseconds, with `matched` naming the terms that drove each decision.
+
+Three properties make the output safe to filter on: a comment that matches nothing is `Other` with zero confidence rather than the least-bad of eight guesses; a term contributes its weight once however often it appears, so a long comment cannot dominate an aggregate by repetition; and security, legal and compliance comments are high priority even when phrased calmly, because those are the ones that become incidents when triaged as ordinary edits.
+
+The anchored text is scored at half weight — it says what a comment is *near*, which is real evidence but weaker than what the comment says.
+
+#### New — chunking that never splits a thread
+
+`chunk_records()` is bin-packing with one hard constraint. A thread cut across two requests gives the model a reply with no comment above it in one call and a question with no answer in the other, and it will confidently summarise both wrong. A thread larger than the budget comes back as one over-budget chunk rather than silently cut, so the caller can see it and decide.
+
+Token counting is exact under `tiktoken` and a calibrated estimate without it. The estimate errs high deliberately: under-counting produces a request the provider rejects, over-counting produces one chunk more than necessary.
+
+#### New — six prompt builders
+
+`create_review_summary_prompt`, `create_action_items_prompt`, `create_resolution_prompt`, `create_triage_prompt`, `create_risk_prompt`, and `create_diff_summary_prompt`, which takes a v1.4 `DiffResult` directly.
+
+Each packs the corpus to a token budget, asks for a named JSON schema, requires every claim to cite a comment id, and **states in the prompt when the corpus did not fit** rather than presenting a truncated review as a complete one. `Prompt.to_anthropic()` and `.to_messages()` cover both provider shapes.
+
+Nothing is sent anywhere: there is no client, no key, and no network call in this package.
+
+#### New — the privacy layer
+
+```python
+clean, report = anonymize_comments(parser.to_comments(), "strict")
+records = parser.to_llm_dataset(anonymize="strict")   # or in one step
+```
+
+A twenty-entity detection layer with checksum validation (Luhn for cards, mod-97 for IBANs, SSA issuance rules for SSNs), five policy presets, six replacement strategies, and a verification pass that re-scans the output.
+
+The decisions worth recording:
+
+- **Overlaps are resolved across every detection, then filtered by policy.** Filtering first lets the `PERSON` inside `bob.reviewer@acme.example` win under a names-only policy, replacing the name and publishing the domain. A span the policy keeps must still shield what sits inside it.
+- **Names come from the document's own roster**, not a shipped gazetteer, so recall on the people who matter is total and a section about a `Mark` is not redacted because someone called Mark reviewed it. Name parts that are also ordinary English words only match when capitalised.
+- **Pseudonym labels are checked against that roster.** A document reviewed by a Bob *Reviewer* has its people renamed to `Person N`, not `Reviewer N` — which would read as a real name and defeat the verification pass.
+- **Credentials are never pseudonymised or masked** by any preset, and a policy asking for it is upgraded to `REDACT`. A partially visible API key is still a leaked API key.
+- **Only file paths carrying a home directory are redacted.** `/var/log/app.log` identifies nobody, and blanking it would destroy a technical comment while protecting no one.
+- **Pseudonym keys are random per `Anonymizer`** unless supplied, because a token stable across everything you have ever exported is itself a persistent identifier.
+- **The vault stays in the process** unless written out by an explicitly named call, and `deanonymize()` puts the real names back into the model's *answer* — the round trip that makes anonymisation practical rather than merely virtuous.
+
+`scan_comments()` and `parser.privacy_scan()` report what is there and change nothing; their output carries type and length only, never a value, so a scan report is itself safe to share.
+
+#### New — four commands
+
+```bash
+docx-comments llm spec.docx --anonymize strict -o review.jsonl
+docx-comments prompt spec.docx --kind risk
+docx-comments classify spec.docx --priority blocker
+docx-comments anonymize contract.docx --scan --fail-on-secret
+```
+
+`llm` and `prompt` scan the export and **warn on standard error** when you export without redacting — the warning goes to the terminal, never into the file you piped to. `anonymize --fail-on-secret` exits `1`, which makes it a pre-commit or CI gate on documents entering a repository.
+
+#### Packaging — still zero dependencies
+
+- The LLM and privacy layers need **no extras at all**: `zipfile`, `xml.etree` and `re`. That is deliberate — a redaction layer you have to install something to get is a redaction layer people skip.
+- New `llm` extra (`tiktoken>=0.7`), added to `all`. Purely a speed and accuracy option for token counting; `docx_comment_parser.llm.token_backend()` records which counter ran.
+- Both layers resolve on first use. `import docx_comment_parser` is unchanged at ~55 ms, and a test asserts that neither package, nor `tiktoken`, nor even `xml.etree.ElementTree` appears in `sys.modules` afterwards.
+- 678 Python tests at 97% coverage, alongside the 66 C++ checks; `mypy --strict` still passes.
+
+#### Performance — no regression
+
+Hiding the two new packages behind an import hook and interleaving the runs measures exactly what they cost a program that never calls them: **+0.3% on import and +0.3% on a 10,000-comment `parse()`**, both inside this machine's measurement error. See [Performance](#performance) for the export and redaction throughput tables.
 
 ### v1.4.0 — Comparing review cycles
 

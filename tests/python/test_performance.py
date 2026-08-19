@@ -573,3 +573,54 @@ def test_comparison_import_stays_lazy() -> None:
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert "clean" in result.stdout
+
+
+def test_llm_and_privacy_imports_stay_lazy() -> None:
+    """Importing the library must not pull in the v1.5 layers or their cost.
+
+    Both packages resolve on first attribute access, the same way reporting and
+    comparison do.  ``zipfile`` and ``xml.etree`` are named explicitly because
+    the context reader needs both, and pulling them in at import time would add
+    milliseconds to every program that only wanted to parse a document.
+    """
+    import subprocess
+    import sys
+
+    code = (
+        "import sys; import docx_comment_parser;"
+        "assert 'docx_comment_parser.llm' not in sys.modules, 'llm imported eagerly';"
+        "assert 'docx_comment_parser.privacy' not in sys.modules, 'privacy imported eagerly';"
+        "assert 'tiktoken' not in sys.modules, 'tiktoken imported eagerly';"
+        "assert 'xml.etree.ElementTree' not in sys.modules, 'ElementTree imported eagerly';"
+        "docx_comment_parser.build_llm_dataset;"
+        "docx_comment_parser.anonymize_comments;"
+        "assert 'docx_comment_parser.llm' in sys.modules, 'lazy attribute did not resolve';"
+        "assert 'docx_comment_parser.privacy' in sys.modules, 'lazy attribute did not resolve';"
+        "print('clean')"
+    )
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert "clean" in result.stdout
+
+
+@pytest.mark.perf
+def test_llm_export_memory_stays_bounded(large_docx: Path) -> None:
+    """A 10,000-comment LLM export must not hold the document text per record.
+
+    Context windows are slices of one cached document string; a naive
+    implementation that copied the surrounding text into every record would use
+    an order of magnitude more memory here.
+    """
+    import tracemalloc
+
+    parser = dcp.DocxParser()
+    parser.parse(str(large_docx))
+
+    tracemalloc.start()
+    records = parser.to_llm_dataset(chars_before=500, chars_after=500)
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    assert len(records) == 10_000
+    peak_mb = peak / (1024 * 1024)
+    assert peak_mb < 400, f"peak memory {peak_mb:.1f} MB for a 10,000-comment export"
