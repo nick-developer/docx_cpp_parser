@@ -39,17 +39,33 @@ visible API key is still a leaked API key.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field, replace
 from enum import Enum
-from typing import Callable, FrozenSet, Mapping, Optional, Tuple, Union, cast
+from typing import (
+    Callable,
+    FrozenSet,
+    Iterable,
+    Mapping,
+    Optional,
+    Tuple,
+    Union,
+)
 
 from .entities import EntityType
+from .validation import (
+    PatternIssue,
+    PatternLike,
+    validate_patterns,
+    validate_values,
+)
 
 __all__ = [
     "Strategy",
     "AnonymizationPolicy",
     "PolicyLike",
     "resolve_policy",
+    "make_policy",
     "PRESET_NAMES",
     "COMMENT_TEXT_FIELDS",
 ]
@@ -116,8 +132,19 @@ class AnonymizationPolicy:
         unreadable — but on in :meth:`strict`.
     mask_visible:
         How many trailing characters :attr:`Strategy.MASK` leaves visible.
-    custom_terms / custom_patterns:
-        Extra literals and ``(name, regex)`` pairs to treat as private.
+    custom_terms:
+        Exact values to treat as private — codenames, customer names, account
+        numbers.  Matched case-insensitively, on word boundaries, with any run
+        of whitespace standing for a space.
+    custom_patterns:
+        Regular expressions to treat as private: a bare regex, ``(name,
+        regex)``, or ``(name, regex, entity)`` to report the match as a specific
+        :class:`~.entities.EntityType`.  Every pattern is checked when the
+        policy is built; an unusable one raises
+        :class:`~.validation.InvalidPatternError` naming the problem.
+    organizations / locations:
+        Literal company and place names, reported as ``ORGANIZATION`` and
+        ``LOCATION`` so their own strategies apply.
     extra_names:
         People to redact who are not comment authors — named in the text but
         never commenting themselves.
@@ -141,10 +168,12 @@ class AnonymizationPolicy:
 
     mask_visible: int = 4
     custom_terms: Tuple[str, ...] = ()
-    custom_patterns: Tuple[Tuple[str, str], ...] = ()
+    custom_patterns: Tuple[Tuple[str, str, EntityType], ...] = ()
     extra_names: Tuple[str, ...] = ()
     detect_mentions: bool = True
     pseudonym_style: str = "role"
+    organizations: Tuple[str, ...] = ()
+    locations: Tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.min_score <= 1.0:
@@ -155,6 +184,25 @@ class AnonymizationPolicy:
             raise ValueError(
                 f"pseudonym_style must be 'role' or 'token', got {self.pseudonym_style!r}"
             )
+        # Validate and normalise the caller's own values here, at configuration
+        # time: a bad regex found mid-export is a half-written file and a bare
+        # re.error, while one found here is a sentence naming the problem.
+        # object.__setattr__ because the dataclass is frozen; the normalised
+        # forms are what make two equivalent policies compare equal.
+        patterns, _ = validate_patterns(self.custom_patterns)
+        object.__setattr__(self, "custom_patterns", patterns)
+        object.__setattr__(self, "custom_terms", validate_values(self.custom_terms))
+        object.__setattr__(
+            self, "organizations", validate_values(self.organizations, "organization")
+        )
+        object.__setattr__(self, "locations", validate_values(self.locations, "location"))
+        object.__setattr__(self, "extra_names", tuple(self.extra_names))
+
+    def pattern_warnings(self) -> Tuple[PatternIssue, ...]:
+        """Non-fatal concerns about the custom patterns, such as a regex that
+        also matches ordinary words or one prone to slow backtracking."""
+        _, warnings = validate_patterns(self.custom_patterns)
+        return warnings
 
     # ── Lookup ──────────────────────────────────────────────────────────────
 
@@ -180,6 +228,42 @@ class AnonymizationPolicy:
     def with_(self, **changes: object) -> "AnonymizationPolicy":
         """Return a copy with the given fields changed."""
         return replace(self, **changes)  # type: ignore[arg-type]
+
+    def with_values(
+        self,
+        values: Iterable[str],
+        entity: Union[str, EntityType] = EntityType.CUSTOM,
+    ) -> "AnonymizationPolicy":
+        """Return a copy that also masks these exact values.
+
+        ``entity`` decides how they are reported and replaced: ``PERSON`` adds
+        them to the names (pseudonymised like a reviewer), ``ORGANIZATION`` and
+        ``LOCATION`` to those lists, anything else to the custom terms.
+        """
+        kind = entity if isinstance(entity, EntityType) else EntityType(str(entity).upper())
+        added = tuple(values)
+        if kind is EntityType.PERSON:
+            return self.with_(extra_names=(*self.extra_names, *added))
+        if kind is EntityType.ORGANIZATION:
+            return self.with_(organizations=(*self.organizations, *added))
+        if kind is EntityType.LOCATION:
+            return self.with_(locations=(*self.locations, *added))
+        if kind is not EntityType.CUSTOM:
+            return self.with_patterns(
+                (f"value-{index}", _literal_regex(value), kind)
+                for index, value in enumerate(validate_values(added), start=1)
+            )
+        return self.with_(custom_terms=(*self.custom_terms, *added))
+
+    def with_patterns(self, patterns: Iterable[PatternLike]) -> "AnonymizationPolicy":
+        """Return a copy that also masks text matching these regular expressions.
+
+        Each entry is a regex, ``(name, regex)`` or ``(name, regex, entity)``.
+        Raises :class:`~.validation.InvalidPatternError` listing every pattern
+        that cannot be used — check them up front with
+        :func:`~.validation.check_pattern` to report problems interactively.
+        """
+        return self.with_(custom_patterns=(*self.custom_patterns, *patterns))
 
     # ── Presets ─────────────────────────────────────────────────────────────
 
@@ -336,3 +420,46 @@ def resolve_policy(policy: PolicyLike) -> AnonymizationPolicy:
             raise ValueError(f"unknown policy preset {policy!r}; choose one of: {valid}")
         return _PRESETS[name]()
     raise TypeError(f"cannot interpret {policy!r} as an anonymisation policy")
+
+
+def _literal_regex(value: str) -> str:
+    """A case-insensitive, word-bounded regex for one literal value.
+
+    Spaces inside the value match any run of whitespace, so a value typed with
+    one space still catches a line break or a non-breaking space in a document.
+    """
+    body = r"\s+".join(re.escape(part) for part in value.split())
+    return rf"(?i)(?<!\w){body}(?!\w)"
+
+
+def make_policy(
+    base: PolicyLike = True,
+    *,
+    values: Iterable[str] = (),
+    patterns: Iterable[PatternLike] = (),
+    names: Iterable[str] = (),
+    organizations: Iterable[str] = (),
+    locations: Iterable[str] = (),
+) -> AnonymizationPolicy:
+    """A preset, plus the caller's own values and patterns, in one call.
+
+    ::
+
+        policy = make_policy(
+            "balanced",
+            values=["Project Falcon", "ACME-4471"],
+            patterns=[("ticket", r"\\bTCK-\\d{6}\\b")],
+            organizations=["Acme Corp"],
+        )
+
+    Every pattern is validated before the policy exists; an unusable one raises
+    :class:`~.validation.InvalidPatternError` describing each problem.
+    """
+    policy = resolve_policy(base)
+    return policy.with_(
+        custom_terms=(*policy.custom_terms, *values),
+        custom_patterns=(*policy.custom_patterns, *patterns),
+        extra_names=(*policy.extra_names, *names),
+        organizations=(*policy.organizations, *organizations),
+        locations=(*policy.locations, *locations),
+    )

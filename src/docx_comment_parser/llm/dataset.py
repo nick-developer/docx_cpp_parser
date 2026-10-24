@@ -34,7 +34,7 @@ consume without a custom decoder is worth more than a clever one.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -49,14 +49,16 @@ from typing import (
 )
 
 from ..models import Comment
-from .classification import Classification, classify_text
-from .context import ContextCache
+from .classification import classify_text
+from .context import ContextCache, ContextLike, ContextSpec, resolve_context
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import pandas
 
     from ..privacy import AnonymizationReport, Anonymizer
     from ..privacy.policy import PolicyLike
+    from .compression import CompressionLike, CompressionStats
+    from .overrides import OverridesLike
 
 __all__ = [
     "LLMRecord",
@@ -114,6 +116,10 @@ class LLMRecord:
     priority: str
     action_required: bool
 
+    overridden: Tuple[str, ...] = ()
+    """The review-intelligence fields a person set by hand (see
+    :mod:`.overrides`); empty when every tag came from the rules."""
+
     def to_dict(self) -> Dict[str, Any]:
         """The record as plain JSON-safe data, in schema order."""
         return {
@@ -137,14 +143,21 @@ class LLMRecord:
             "intent": self.intent,
             "priority": self.priority,
             "action_required": self.action_required,
+            "overridden": list(self.overridden),
         }
 
-    def to_text(self) -> str:
+    def to_text(self, max_context_chars: Optional[int] = None) -> str:
         """A compact readable rendering, for pasting into a prompt.
 
         Empty sections are omitted rather than written as blank labels: a
         model reading twenty records should not have to skip twenty
         ``Context: (none)`` lines to find the one that has context.
+
+        The context is rendered as built — choose how much with ``context=``
+        and reduce it with ``compress=`` when building the dataset.  Pass
+        ``max_context_chars`` to clip each side here as well; the clip keeps the
+        text *nearest the anchor* on both sides, which is the part that
+        explains the comment.
         """
         lines = [
             f"[#{self.comment_id}] {self.author}"
@@ -155,10 +168,12 @@ class LLMRecord:
         if self.referenced_text:
             lines.append(f'  on: "{_clip(self.referenced_text, 300)}"')
         if self.context_before or self.context_after:
-            lines.append(
-                f"  context: …{_clip(self.context_before, 200)}"
-                f" ⟪anchor⟫ {_clip(self.context_after, 200)}…"
-            )
+            before = " ".join(self.context_before.split())
+            after = " ".join(self.context_after.split())
+            if max_context_chars is not None:
+                before = _clip_tail(before, max_context_chars)
+                after = _clip(after, max_context_chars)
+            lines.append(f"  context: …{before} ⟪anchor⟫ {after}…")
         lines.append(f"  says: {self.comment}")
         if len(self.thread) > 1:
             for entry in self.thread:
@@ -175,6 +190,18 @@ def _clip(text: str, limit: int) -> str:
         return collapsed
     cut = collapsed.rfind(" ", 0, limit)
     return collapsed[: cut if cut > limit * 0.6 else limit].rstrip() + "…"
+
+
+def _clip_tail(text: str, limit: int) -> str:
+    """Keep the *last* ``limit`` characters on a word boundary — the mirror of
+    :func:`_clip`, for text that leads up to an anchor."""
+    collapsed = " ".join(text.split())
+    if len(collapsed) <= limit:
+        return collapsed
+    start = len(collapsed) - limit
+    cut = collapsed.find(" ", start)
+    begin = cut + 1 if 0 <= cut < start + limit * 0.4 else start
+    return "…" + collapsed[begin:].lstrip()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -196,6 +223,12 @@ class LLMDataset:
     anonymizer: Optional["Anonymizer"] = None
     """Present when anonymisation ran. Holds the vault that reverses the
     pseudonyms in a model's answer — see ``Anonymizer.deanonymize``."""
+
+    compression: Optional["CompressionStats"] = None
+    """Present when compression ran: tokens before and after."""
+
+    context: Optional[ContextSpec] = None
+    """How the context windows were measured."""
 
     def __iter__(self) -> Any:
         return iter(self.records)
@@ -234,6 +267,36 @@ class LLMDataset:
         from .chunking import chunk_records
 
         return chunk_records(self.records, max_tokens, **kwargs)
+
+    def with_overrides(
+        self, overrides: "OverridesLike", *, strict: bool = True
+    ) -> "LLMDataset":
+        """A copy with category / priority / intent / action_required set by hand.
+
+        ``overrides`` is a mapping keyed by comment id (or ``(document, id)``),
+        a list of row dicts, or a path to a labels file.  See
+        :func:`~.overrides.apply_overrides`.
+        """
+        from dataclasses import replace
+
+        from .overrides import apply_overrides
+
+        return replace(self, records=apply_overrides(self.records, overrides, strict=strict))
+
+    def compress(self, level: "CompressionLike" = "balanced") -> "LLMDataset":
+        """A copy with fewer tokens. See :mod:`.compression` for the levels."""
+        from dataclasses import replace
+
+        from .compression import compress_records
+
+        records, stats = compress_records(self.records, level)
+        return replace(self, records=records, compression=stats or self.compression)
+
+    def export_labels(self, path: PathLike) -> "Path":
+        """Write the editable labels CSV that ``overrides=`` reads back."""
+        from .overrides import export_labels
+
+        return export_labels(self.records, path)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -299,16 +362,34 @@ def build_dataset(
     anonymize: Optional["PolicyLike"] = None,
     anonymizer: Optional["Anonymizer"] = None,
     documents: Optional[Dict[str, str]] = None,
+    context: Optional[ContextLike] = None,
+    overrides: Optional["OverridesLike"] = None,
+    compress: "CompressionLike" = None,
 ) -> LLMDataset:
     """Turn parsed comments into model-ready records.
 
     Parameters
     ----------
     chars_before / chars_after:
-        Width of the document context window around each anchor.  Set both to 0,
-        or ``include_context=False``, to skip reading the source documents
-        entirely — which is what you want when the .docx files are no longer on
-        this machine, or when the anchors alone are enough.
+        Width of the document context window around each anchor, in
+        characters.  Set both to 0, or ``include_context=False``, to skip
+        reading the source documents entirely — which is what you want when the
+        .docx files are no longer on this machine, or when the anchors alone
+        are enough.
+    context:
+        Measure the window in another unit instead: a
+        :class:`~.context.ContextSpec` such as ``ContextSpec(2, 1,
+        "sentences")``, a mapping of its fields (``{"unit": "paragraphs",
+        "before": 1, "after": 0}``), or just a unit name for its default
+        amount.  Overrides ``chars_before``/``chars_after`` when given.
+    overrides:
+        Manual corrections to category / priority / intent / action_required,
+        applied on top of the rules.  See :mod:`.overrides`.
+    compress:
+        ``"light"``, ``"balanced"``, ``"aggressive"`` or a
+        :class:`~.compression.CompressionConfig`: reduce the tokens the records
+        cost.  Applied last, after anonymisation, so it only ever sees the
+        redacted text.  See :mod:`.compression`.
     include_thread:
         Carry the whole conversation on every record in it.
     classify:
@@ -329,7 +410,9 @@ def build_dataset(
     :class:`LLMDataset` — a sequence of records that also carries the
     anonymisation report and the vault needed to reverse it.
     """
-    materialised = list(comments)
+    originals = list(comments)
+    materialised = originals
+    spec = resolve_context(context, chars_before, chars_after)
 
     report = None
     engine = anonymizer
@@ -343,18 +426,41 @@ def build_dataset(
         if engine is None:
             engine = Anonymizer(
                 anonymize if anonymize is not None else True,
-                names=[comment.author for comment in materialised],
+                names=[comment.author for comment in originals],
             )
-        materialised, report = anonymize_comments(materialised, anonymizer=engine)
+        materialised, report = anonymize_comments(originals, anonymizer=engine)
 
     grouped = _threads(materialised)
-    cache = ContextCache(enabled=include_context and (chars_before or chars_after) > 0)
-    overrides = documents or {}
+    cache = ContextCache(enabled=include_context and spec.enabled)
+    sources = documents or {}
 
     records: List[LLMRecord] = []
-    for comment in materialised:
-        source = overrides.get(comment.document_name, comment.document_name)
-        window = cache.get(source).window(comment.comment_id, chars_before, chars_after)
+    redactor = _ContextRedactor(engine) if engine is not None else None
+    context_changed = 0
+    for original, comment in zip(originals, materialised):
+        # The context is looked up under the *original* document path. Under
+        # a policy that hashes document names, the anonymised comment's
+        # document_name is "document_1a2b3c4d", which names no file -- reading
+        # context through it silently produced records with none at all.
+        document = original.document_name
+        source = cache.get(sources.get(document, document))
+        bounds = source.bounds_for(comment.comment_id, spec) if source else None
+        before = after = window_anchor = ""
+        if bounds is not None:
+            begin, start, end, finish = bounds
+            text = source.text
+            before, window_anchor, after = text[begin:start], text[start:end], text[end:finish]
+            if redactor is not None:
+                # The context is document text and holds the same names,
+                # addresses and keys as the comments do -- often more. It goes
+                # through the same engine, so a person is the same stand-in in
+                # both.
+                redacted = (redactor.render(source, begin, start), redactor.render(source, end, finish))
+                context_changed += (redacted[0] != before) + (redacted[1] != after)
+                before, after = redacted
+                if not comment.referenced_text:
+                    window_anchor = redactor.render(source, start, end)
+        anchor = comment.referenced_text or window_anchor
 
         thread = grouped.get((comment.document_name, comment.root_id), [comment])
         classification = (
@@ -367,9 +473,9 @@ def build_dataset(
             LLMRecord(
                 comment_id=comment.comment_id,
                 author=comment.author,
-                context_before=window.before,
-                referenced_text=comment.referenced_text or window.anchor,
-                context_after=window.after,
+                context_before=before,
+                referenced_text=anchor,
+                context_after=after,
                 comment=comment.text,
                 thread=_thread_entries(thread) if include_thread else (),
                 thread_id=comment.root_id,
@@ -388,9 +494,126 @@ def build_dataset(
             )
         )
 
+    if report is not None and engine is not None and redactor is not None and redactor.used:
+        from dataclasses import replace
+
+        # Fold the context into the report: its replacements into the counts
+        # and its leftovers into the residual, so "verified clean" covers every
+        # string in the records rather than only the comment fields. The audit
+        # reads each redacted paragraph once; every window is cut from those.
+        counts, skipped = engine.stats()
+        report = replace(
+            report,
+            fields_changed=report.fields_changed + context_changed,
+            replacements=sum(counts.values()),
+            entity_counts=counts,
+            skipped_low_confidence=skipped,
+            residual=report.residual + tuple(engine.audit(redactor.redacted_paragraphs())),
+            pseudonyms=len(engine.vault),
+        )
+
+    built: Tuple[LLMRecord, ...] = tuple(records)
+    if overrides is not None:
+        from .overrides import apply_overrides
+
+        built = apply_overrides(built, overrides)
+
+    stats = None
+    if compress is not None:
+        from .compression import compress_records
+
+        built, stats = compress_records(built, compress)
+
     return LLMDataset(
-        records=tuple(records), anonymization=report, anonymizer=engine
+        records=built,
+        anonymization=report,
+        anonymizer=engine,
+        compression=stats,
+        context=spec if include_context else None,
     )
+
+
+class _ContextRedactor:
+    """Anonymises document context once per paragraph, then cuts windows.
+
+    Context windows overlap heavily — every comment in a paragraph sees the
+    same sentences — so redacting each window separately scans the same text
+    many times over.  It also gets edges wrong: a window that ends half-way
+    through an email address hands the detector a fragment it may not
+    recognise.  Here each paragraph a window touches is scanned once, whole;
+    a window is then rendered from those spans, and a value cut by the
+    window's edge is replaced whole rather than leaked in part.
+    """
+
+    __slots__ = ("_engine", "_spans", "_redacted")
+
+    def __init__(self, engine: "Anonymizer") -> None:
+        self._engine = engine
+        self._spans: Dict[Tuple[Any, int], List[Any]] = {}
+        self._redacted: List[str] = []
+
+    @property
+    def used(self) -> bool:
+        return bool(self._spans)
+
+    def _paragraph_spans(self, context: Any, index: int, start: int, end: int) -> List[Any]:
+        key = (context, index)
+        spans = self._spans.get(key)
+        if spans is None:
+            from ..privacy.entities import Span
+
+            paragraph = context.text[start:end]
+            found, skipped = self._engine._detect(paragraph)
+            spans = [
+                Span(span.start + start, span.end + start, span.entity, span.text,
+                     span.score, span.recognizer)
+                for span in found
+            ]
+            self._spans[key] = spans
+            if skipped:
+                self._engine._add_stats({}, skipped)
+            # The redacted paragraph is what the verification pass reads.
+            self._redacted.append(self._render_spans(context.text, start, end, spans, count=False))
+        return spans
+
+    def _render_spans(self, text: str, begin: int, finish: int, spans: List[Any], *, count: bool) -> str:
+        pieces: List[str] = []
+        cursor = begin
+        counts: Dict[Any, int] = {}
+        for span in spans:
+            if span.end <= begin or span.start >= finish:
+                continue
+            if span.start > cursor:
+                pieces.append(text[cursor:span.start])
+            pieces.append(self._engine.replacement_for(span))
+            cursor = max(cursor, span.end)
+            counts[span.entity] = counts.get(span.entity, 0) + 1
+        if cursor < finish:
+            pieces.append(text[cursor:finish])
+        if count and counts:
+            self._engine._add_stats(counts, 0)
+        return "".join(pieces)
+
+    def render(self, context: Any, begin: int, finish: int) -> str:
+        """``context.text[begin:finish]`` with every private value replaced."""
+        if begin >= finish:
+            return ""
+        text = context.text
+        pieces: List[str] = []
+        cursor = begin
+        for index, start, end in context.paragraph_ranges(begin, finish):
+            low, high = max(begin, start), min(finish, end)
+            if low > cursor:
+                pieces.append(text[cursor:low])
+            spans = self._paragraph_spans(context, index, start, end)
+            pieces.append(self._render_spans(text, low, high, spans, count=True))
+            cursor = high
+        if cursor < finish:
+            pieces.append(text[cursor:finish])
+        return "".join(pieces)
+
+    def redacted_paragraphs(self) -> List[str]:
+        return self._redacted
 
 
 #: The tags a record carries when classification is switched off. A record must
@@ -430,7 +653,9 @@ def to_embeddings_input(
     """One retrieval document per thread (or per comment), ready to embed.
 
     Each entry is ``{id, text, metadata}`` — the shape every vector store
-    accepts, and the shape none of them require you to reshape.
+    accepts, and the shape none of them require you to reshape.  Every
+    :func:`build_dataset` option — ``context=``, ``compress=``,
+    ``overrides=`` — passes through.
 
     ``granularity``
         ``"thread"`` (default) emits one document per conversation.  This is

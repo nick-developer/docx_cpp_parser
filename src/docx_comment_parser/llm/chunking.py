@@ -21,7 +21,7 @@ necessary, which nobody notices.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -107,7 +107,18 @@ def estimate_tokens(text: str) -> int:
     encoder = _tiktoken_encoder()
     if encoder is not None:
         return len(encoder.encode(text, disallowed_special=()))
+    return approximate_tokens(text)
 
+
+def approximate_tokens(text: str) -> int:
+    """The calibrated estimate alone, whether or not ``tiktoken`` is installed.
+
+    Microseconds per call and deliberately on the high side, which makes it the
+    right counter for *deciding* what fits: a selection that fits under this
+    estimate fits under an exact count too.
+    """
+    if not text:
+        return 0
     by_chars = len(text) / _CHARS_PER_TOKEN
     by_words = text.count(" ") * 1.3 + 1
     return int(max(by_chars, by_words)) + 1

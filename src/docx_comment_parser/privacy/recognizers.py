@@ -232,8 +232,36 @@ class RegexRecognizer(Recognizer):
         )
         self.trigger = frozenset(trigger)
 
+    def _shorten(self, text: str, match: "re.Match[str]") -> Optional[Tuple[int, int]]:
+        """The longest prefix of a rejected match that is itself a valid match.
+
+        Only prefixes ending on a token boundary are tried — a shortened value
+        must not stop in the middle of a word or a digit group — and only for
+        whole-match patterns, where the prefix is the value.
+        """
+        if self.group != 0 or self.validator is None:
+            return None
+        start, end = match.span()
+        for cut in range(end - 1, start, -1):
+            if not text[cut - 1].isalnum() or text[cut].isalnum():
+                continue
+            if self.pattern.fullmatch(text, start, cut) and self.validator(text[start:cut]):
+                return start, cut
+        return None
+
     def find(self, text: str) -> Iterator[Span]:
-        for match in self.pattern.finditer(text):
+        position = 0
+        length = len(text)
+        while position <= length:
+            match = self.pattern.search(text, position)
+            if match is None:
+                return
+            # finditer would resume after a match even when the validator then
+            # throws it away. A shape that starts one character too early --
+            # the "3" of "version 1.2.3" glued to a card number after it --
+            # would then hide the real value for good. A rejected match resumes
+            # the search one character later instead.
+            position = match.end() if match.end() > match.start() else match.start() + 1
             start, end = match.span(self.group)
             if start < 0:  # pragma: no cover - optional group did not take part
                 continue
@@ -243,6 +271,18 @@ class RegexRecognizer(Recognizer):
             if self.validator is not None:
                 ok = bool(self.validator(matched))
                 if self.validated_score is None and not ok:
+                    # The match may be a real value that ran on into its
+                    # neighbour ("+44 20 7946 0958 4111 1111 ..."); offer the
+                    # longest valid shortening as well. Overlap resolution
+                    # later keeps whichever candidate is longest.
+                    shorter = self._shorten(text, match)
+                    if shorter is not None:
+                        yield Span(
+                            start=shorter[0], end=shorter[1], entity=self.entity,
+                            text=text[shorter[0]:shorter[1]], score=score,
+                            recognizer=self.name,
+                        )
+                    position = match.start() + 1
                     continue
                 if self.validated_score is not None:
                     score = self.validated_score if ok else self.score
@@ -315,14 +355,28 @@ def _name_variants(full_name: str) -> Tuple[List[str], List[str]]:
     return insensitive, capitalised
 
 
+def _escape_flexible(term: str) -> str:
+    """Escape ``term``, letting each space in it match any run of whitespace.
+
+    A name typed once as ``Alice Tester`` appears in documents with a double
+    space, a line break or a non-breaking space between the parts; matching
+    only the literal single space would leak every one of those.
+    """
+    return r"\s+".join(re.escape(part) for part in term.split(" ") if part)
+
+
 def _alternation(terms: Sequence[str]) -> str:
     """Build a longest-first alternation of escaped terms.
 
     Longest-first matters: Python's ``|`` is first-match, not longest-match, so
     ``Alice|Alice Tester`` would only ever match the first name.
     """
-    unique = sorted({term for term in terms if term}, key=len, reverse=True)
-    return "|".join(re.escape(term) for term in unique)
+    unique = sorted(
+        {" ".join(term.split()) for term in terms if term and term.strip()},
+        key=len,
+        reverse=True,
+    )
+    return "|".join(_escape_flexible(term) for term in unique)
 
 
 class NameRecognizer(Recognizer):
@@ -581,9 +635,13 @@ _BUILTIN_SPECS: Tuple[Recognizer, ...] = (
         # Requires either an international prefix or bracketed/separated groups:
         # a bare run of digits is far more likely to be an identifier. The
         # trailing guard excludes word characters but *not* a full stop, because
-        # a phone number at the end of a sentence is the common case.
+        # a phone number at the end of a sentence is the common case -- unless
+        # the stop is followed by a digit. Without that exception the match ran
+        # on into a following dotted number ("+1-202-555-0143 192.168.0.5"),
+        # grew past fifteen digits, failed validation, and the phone number
+        # was dropped instead of the regex backtracking to it.
         r"(?<![\w.\-])(?:\+\d{1,3}[ .\-]?)?(?:\(\d{2,4}\)[ .\-]?|\d{2,4}[ .\-])"
-        r"\d{2,4}(?:[ .\-]?\d{2,4}){1,3}(?![\w\-])",
+        r"\d{2,4}(?:[ .\-]?\d{2,4}){1,3}(?![\w\-]|[.,:]\d)",
         score=0.6,
         validator=_phone_plausible,
         trigger=_DIGITS,
@@ -652,8 +710,10 @@ def default_recognizers(
     names: Iterable[str] = (),
     *,
     custom_terms: Iterable[str] = (),
-    custom_patterns: Iterable[Tuple[str, str]] = (),
+    custom_patterns: Iterable[Union[Tuple[str, str], Tuple[str, str, EntityType]]] = (),
     detect_mentions: bool = True,
+    organizations: Iterable[str] = (),
+    locations: Iterable[str] = (),
 ) -> List[Recognizer]:
     """Assemble the detector set for one anonymisation run.
 
@@ -665,8 +725,13 @@ def default_recognizers(
     custom_terms:
         Extra literals to treat as ``CUSTOM``: codenames, customer names.
     custom_patterns:
-        ``(name, regex)`` pairs, each matched as ``CUSTOM``.  Compiled here so a
-        bad pattern raises at configuration time rather than mid-export.
+        ``(name, regex)`` pairs matched as ``CUSTOM``, or ``(name, regex,
+        entity)`` triples matched as that entity.  Compiled here so a bad
+        pattern raises at configuration time rather than mid-export.
+    organizations / locations:
+        Literal company and place names, matched as ``ORGANIZATION`` and
+        ``LOCATION`` — the only source of those types, since no gazetteer is
+        shipped.
     """
     recognizers: List[Recognizer] = list(_BUILTIN_SPECS)
 
@@ -680,9 +745,16 @@ def default_recognizers(
     if terms:
         recognizers.append(TermRecognizer(terms))
 
-    for pattern_name, pattern in custom_patterns:
-        recognizers.append(
-            RegexRecognizer(pattern_name, EntityType.CUSTOM, pattern)
-        )
+    for entity, values, label in (
+        (EntityType.ORGANIZATION, list(organizations), "organizations"),
+        (EntityType.LOCATION, list(locations), "locations"),
+    ):
+        if values:
+            recognizers.append(TermRecognizer(values, entity, name=label))
+
+    for spec in custom_patterns:
+        pattern_name, pattern = spec[0], spec[1]
+        entity = spec[2] if len(spec) > 2 else EntityType.CUSTOM
+        recognizers.append(RegexRecognizer(pattern_name, entity, pattern))
 
     return recognizers

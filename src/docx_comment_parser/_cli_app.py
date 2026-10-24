@@ -777,6 +777,37 @@ POLICY_OPT = typer.Option(
         "balanced, strict, names-only, secrets-only, gdpr."
     ),
 )
+MASK_VALUE_OPT = typer.Option(
+    None, "--mask-value",
+    help="An exact value to mask, e.g. a codename or account number. Repeatable. "
+         "Implies --anonymize balanced when no policy is given.",
+)
+MASK_PATTERN_OPT = typer.Option(
+    None, "--mask-pattern",
+    help="A regular expression whose matches are masked. Repeatable. Checked "
+         "before use; an invalid or over-broad pattern is refused with a reason.",
+)
+CONTEXT_UNIT_OPT = typer.Option(
+    "chars", "--context-unit",
+    help="Measure --before/--after in chars, words, sentences or paragraphs.",
+)
+BEFORE_OPT = typer.Option(
+    None, "--before",
+    help="Context before the anchor, in --context-unit "
+         "(default 500 chars, 80 words, 2 sentences or 1 paragraph).",
+)
+AFTER_OPT = typer.Option(
+    None, "--after", help="Context after the anchor, in --context-unit."
+)
+COMPRESS_OPT = typer.Option(
+    None, "--compress",
+    help="Reduce tokens: none, light, balanced or aggressive.",
+)
+OVERRIDES_OPT = typer.Option(
+    None, "--overrides",
+    help="Manual category/priority/intent/action_required tags from a .csv, "
+         ".json or .jsonl file (see 'classify --export-labels').",
+)
 
 
 def _resolve_policy_option(name: Optional[str]) -> Optional[str]:
@@ -793,6 +824,78 @@ def _resolve_policy_option(name: Optional[str]) -> Optional[str]:
             + ", ".join(sorted(PRESET_NAMES)).replace("_", "-")
         )
     return name.replace("-", "_")
+
+
+def _build_policy(
+    name: Optional[str],
+    mask_values: Optional[List[str]],
+    mask_patterns: Optional[List[str]],
+) -> Optional[Any]:
+    """The policy for --anonymize plus any --mask-value / --mask-pattern.
+
+    Patterns are checked here, before a document is opened: an invalid regex
+    is reported with its position, an over-broad one with what it would have
+    redacted, and a merely suspicious one as a warning that still proceeds.
+    """
+    preset = _resolve_policy_option(name)
+    if not mask_values and not mask_patterns:
+        return preset
+    from .privacy import InvalidPatternError, make_policy
+
+    try:
+        policy = make_policy(
+            preset or "balanced",
+            values=mask_values or (),
+            patterns=mask_patterns or (),
+        )
+    except InvalidPatternError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--mask-value / --mask-pattern")
+    for issue in policy.pattern_warnings():
+        err_console.print(f"[yellow]Pattern warning:[/] {issue.describe()}", highlight=False)
+    return policy
+
+
+def _context_option(unit: str, before: Optional[int], after: Optional[int]) -> Any:
+    from .llm.context import ContextSpec
+
+    try:
+        return ContextSpec.of(unit, before, after)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc))
+
+
+def _compress_option(level: Optional[str]) -> Any:
+    if level is None:
+        return None
+    from .llm.compression import resolve_compression
+
+    try:
+        return resolve_compression(level)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--compress")
+
+
+def _overrides_option(path: Optional[Path]) -> Any:
+    if path is None:
+        return None
+    from .llm.overrides import OverrideError, load_overrides
+
+    try:
+        return load_overrides(path)
+    except OverrideError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--overrides")
+
+
+def _apply_overrides_or_exit(dataset: Any, overrides: Any) -> Any:
+    """Apply loaded overrides, turning a mismatch into a clean CLI error."""
+    if overrides is None:
+        return dataset
+    from .llm.overrides import OverrideError
+
+    try:
+        return dataset.with_overrides(overrides)
+    except OverrideError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--overrides")
 
 
 def _warn_if_private(comments: Sequence[Comment], anonymized: bool) -> None:
@@ -845,12 +948,9 @@ def llm(
         "thread", "--granularity",
         help="For --embeddings: one document per 'thread' or per 'comment'.",
     ),
-    chars_before: int = typer.Option(
-        500, "--before", help="Characters of document context before the anchor."
-    ),
-    chars_after: int = typer.Option(
-        500, "--after", help="Characters of document context after the anchor."
-    ),
+    context_unit: str = CONTEXT_UNIT_OPT,
+    chars_before: Optional[int] = BEFORE_OPT,
+    chars_after: Optional[int] = AFTER_OPT,
     no_context: bool = typer.Option(
         False, "--no-context",
         help="Skip reading the document body. Faster; loses context_before/after.",
@@ -858,7 +958,11 @@ def llm(
     no_threads: bool = typer.Option(
         False, "--no-threads", help="Do not carry the thread on every record."
     ),
+    compress: Optional[str] = COMPRESS_OPT,
+    overrides: Optional[Path] = OVERRIDES_OPT,
     anonymize: Optional[str] = POLICY_OPT,
+    mask_value: Optional[List[str]] = MASK_VALUE_OPT,
+    mask_pattern: Optional[List[str]] = MASK_PATTERN_OPT,
     vault: Optional[Path] = typer.Option(
         None, "--vault",
         help="Write the pseudonym mapping here (mode 0600). Keep it separate "
@@ -878,12 +982,22 @@ def llm(
 
         docx-comments llm spec.docx --anonymize strict -o review.jsonl
 
+        docx-comments llm spec.docx --context-unit sentences --before 2 --after 1 --compress balanced
+
     Without --anonymize the command scans the export and warns on standard
     error about anything private it found. It never sends anything anywhere.
     """
     if granularity not in {"thread", "comment"}:
         raise typer.BadParameter("--granularity must be 'thread' or 'comment'.")
-    policy = _resolve_policy_option(anonymize)
+    policy = _build_policy(anonymize, mask_value, mask_pattern)
+    if embeddings and context_unit == "chars":
+        # Retrieval documents are embedded whole; a shorter default window keeps
+        # each one inside an embedding model's input limit.
+        chars_before = 300 if chars_before is None else min(chars_before, 300)
+        chars_after = 300 if chars_after is None else min(chars_after, 300)
+    spec = _context_option(context_unit, chars_before, chars_after)
+    compression = _compress_option(compress)
+    manual = _overrides_option(overrides)
 
     selected = filter_comments(
         _load(file),
@@ -903,25 +1017,27 @@ def llm(
         else None
     )
 
+    records = None
     if embeddings:
         payload: Any = to_embeddings_input(
             selected,
             granularity=granularity,
-            chars_before=min(chars_before, 300),
-            chars_after=min(chars_after, 300),
+            context=spec,
             include_context=not no_context,
             anonymizer=engine,
+            overrides=manual,
+            compress=compression,
         )
-        records = None
     else:
         dataset = build_dataset(
             selected,
-            chars_before=chars_before,
-            chars_after=chars_after,
+            context=spec,
             include_thread=not no_threads,
             include_context=not no_context,
             anonymizer=engine,
+            compress=compression,
         )
+        dataset = _apply_overrides_or_exit(dataset, manual)
         payload = dataset.to_dicts()
         records = dataset
 
@@ -949,6 +1065,9 @@ def llm(
         console.print(
             f"[green]{GLYPH_OK}[/] Wrote {len(payload)} record(s) to [bold]{output}[/]"
         )
+
+    if records is not None and records.compression is not None:
+        err_console.print(f"[cyan]{records.compression.summary()}[/]")
 
     if engine is not None and vault is not None:
         engine.vault.export(vault)
@@ -986,7 +1105,19 @@ def prompt(
     as_json: bool = typer.Option(
         False, "--json", help="Emit {system, user, included, omitted} as JSON."
     ),
+    context_unit: str = CONTEXT_UNIT_OPT,
+    chars_before: Optional[int] = BEFORE_OPT,
+    chars_after: Optional[int] = AFTER_OPT,
+    compress: Optional[str] = COMPRESS_OPT,
+    overrides: Optional[Path] = OVERRIDES_OPT,
     anonymize: Optional[str] = POLICY_OPT,
+    mask_value: Optional[List[str]] = MASK_VALUE_OPT,
+    mask_pattern: Optional[List[str]] = MASK_PATTERN_OPT,
+    vault: Optional[Path] = typer.Option(
+        None, "--vault",
+        help="Write the pseudonym mapping here (mode 0600), so 'check-response "
+             "--vault' can put the real names back into the model's answer.",
+    ),
     author: Optional[str] = AUTHOR_OPT,
     contains: Optional[str] = CONTAINS_OPT,
     resolved: bool = RESOLVED_OPT,
@@ -997,10 +1128,10 @@ def prompt(
     Packs as many comments as the budget allows, says what did not fit, and
     requires every claim in the answer to cite a comment id:
 
-        docx-comments prompt spec.docx --kind risk --anonymize strict
+        docx-comments prompt spec.docx --kind risk --anonymize strict --compress balanced
 
     Prints the prompt. Sending it is your business — this command has no
-    network access and no API key.
+    network access and no API key. Check the answer with 'check-response'.
     """
     from .llm import prompts as prompt_builders
     from .llm.dataset import build_dataset
@@ -1021,7 +1152,10 @@ def prompt(
             + ", ".join(sorted(builders))
         )
 
-    policy = _resolve_policy_option(anonymize)
+    policy = _build_policy(anonymize, mask_value, mask_pattern)
+    spec = _context_option(context_unit, chars_before, chars_after)
+    compression = _compress_option(compress)
+    manual = _overrides_option(overrides)
     selected = filter_comments(
         _load(file),
         author=author,
@@ -1030,7 +1164,8 @@ def prompt(
     )
     _warn_if_private(selected, anonymized=policy is not None)
 
-    dataset = build_dataset(selected, anonymize=policy)
+    dataset = build_dataset(selected, anonymize=policy, context=spec, compress=compression)
+    dataset = _apply_overrides_or_exit(dataset, manual)
     built = builder(dataset.records, budget=budget)
 
     text = (
@@ -1055,6 +1190,28 @@ def prompt(
             f"[yellow]{built.omitted} comment(s) did not fit the budget "
             f"and are not in the prompt.[/]"
         )
+    if built.flagged:
+        err_console.print(
+            "[yellow]Prompt injection:[/] comment(s) "
+            + ", ".join(f"#{identifier}" for identifier in built.flagged)
+            + " read like instructions to a model. The prompt tells the model "
+            "to treat them as data; review them before sending."
+        )
+    if dataset.compression is not None:
+        err_console.print(f"[cyan]{dataset.compression.summary()}[/]")
+    if vault is not None:
+        if dataset.anonymizer is None:
+            err_console.print(
+                "[yellow]--vault ignored:[/] nothing was anonymised, so there is "
+                "no mapping to write. Add --anonymize."
+            )
+        else:
+            dataset.anonymizer.vault.export(vault)
+            err_console.print(
+                f"[yellow]Vault:[/] {len(dataset.anonymizer.vault)} mapping(s) written "
+                f"to [bold]{vault}[/]. This file re-identifies the prompt — store it "
+                f"separately."
+            )
 
 
 @app.command()
@@ -1072,6 +1229,12 @@ def classify(
     actions_only: bool = typer.Option(
         False, "--actions-only", help="Show only comments that ask for something."
     ),
+    overrides: Optional[Path] = OVERRIDES_OPT,
+    export_labels: Optional[Path] = typer.Option(
+        None, "--export-labels",
+        help="Write an editable labels CSV. Change any category / priority / "
+             "intent / action_required cell and pass the file back with --overrides.",
+    ),
     limit: Optional[int] = LIMIT_OPT,
     author: Optional[str] = AUTHOR_OPT,
     contains: Optional[str] = CONTAINS_OPT,
@@ -1080,36 +1243,52 @@ def classify(
 ) -> None:
     """Categorise comments by subject, intent and priority.
 
-    Rule-based, local, and instant — no model involved:
+    Rule-based, local, and instant — no model involved. Correct it by hand:
 
-        docx-comments classify spec.docx --priority blocker
+        docx-comments classify spec.docx --export-labels labels.csv
+
+        docx-comments classify spec.docx --overrides labels.csv --priority blocker
+
+    Manually set tags are marked with * in the table.
     """
-    from .llm.classification import classify_comment
+    from .llm.dataset import build_dataset
 
+    manual = _overrides_option(overrides)
     selected = filter_comments(
         _load(file),
         author=author,
         contains=contains,
         resolved=_resolved_flag(resolved, unresolved_only),
     )
-    tagged = [(comment, classify_comment(comment)) for comment in selected]
+    # Records rather than bare classifications: they carry the tags *and* the
+    # manual corrections, through the same path the LLM export uses.
+    dataset = build_dataset(selected, include_context=False, include_thread=False)
+    dataset = _apply_overrides_or_exit(dataset, manual)
+    tagged = list(dataset.records)
+
+    if export_labels is not None:
+        dataset.export_labels(export_labels)
+        console.print(
+            f"[green]{GLYPH_OK}[/] Wrote {len(tagged)} label row(s) to "
+            f"[bold]{export_labels}[/]. Edit the tags and pass it back with --overrides."
+        )
 
     if category:
         needle = category.casefold()
-        tagged = [pair for pair in tagged if pair[1].category.value.casefold() == needle]
+        tagged = [record for record in tagged if record.category.casefold() == needle]
     if priority:
         needle = priority.casefold()
-        tagged = [pair for pair in tagged if pair[1].priority.value == needle]
+        tagged = [record for record in tagged if record.priority == needle]
     if actions_only:
-        tagged = [pair for pair in tagged if pair[1].action_required]
+        tagged = [record for record in tagged if record.action_required]
 
     if not tagged:
         console.print("[yellow]No comments matched.[/]")
         return
 
     counts: Dict[str, int] = {}
-    for _, result in tagged:
-        counts[result.category.value] = counts.get(result.category.value, 0) + 1
+    for record in tagged:
+        counts[record.category] = counts.get(record.category, 0) + 1
 
     breakdown = Table(title="Categories", header_style="bold cyan")
     breakdown.add_column("Category")
@@ -1130,20 +1309,26 @@ def classify(
     priority_colour = {
         "blocker": "bold red", "high": "red", "medium": "yellow", "low": "dim"
     }
-    for comment, result in shown:
+
+    def mark(record: Any, field: str, value: str) -> str:
+        return f"{value}*" if field in record.overridden else value
+
+    for record in shown:
         table.add_row(
-            str(comment.comment_id),
-            comment.author or GLYPH_EMPTY,
-            result.category.value,
-            f"[{priority_colour.get(result.priority.value, '')}]"
-            f"{result.priority.value}[/]",
-            result.intent.value.replace("_", " "),
-            _truncate(comment.text, 70),
+            str(record.comment_id),
+            record.author or GLYPH_EMPTY,
+            mark(record, "category", record.category),
+            f"[{priority_colour.get(record.priority, '')}]"
+            f"{mark(record, 'priority', record.priority)}[/]",
+            mark(record, "intent", record.intent.replace("_", " ")),
+            _truncate(record.comment, 70),
         )
     console.print(table)
 
     if limit and len(tagged) > limit:
         console.print(f"[dim]Showing {limit} of {len(tagged)} comment(s).[/]")
+    if any(record.overridden for record in shown):
+        console.print("[dim]* set by hand (--overrides).[/]")
 
 
 @app.command()
@@ -1156,6 +1341,8 @@ def anonymize(
         "balanced", "--policy", "-p",
         help="balanced, strict, names-only, secrets-only or gdpr.",
     ),
+    mask_value: Optional[List[str]] = MASK_VALUE_OPT,
+    mask_pattern: Optional[List[str]] = MASK_PATTERN_OPT,
     output: Optional[Path] = typer.Option(
         None, "--output", "-o",
         help="Write the redacted comments here (.json or .csv). "
@@ -1177,24 +1364,21 @@ def anonymize(
 
         docx-comments anonymize contract.docx -p strict -o clean.json
 
+        docx-comments anonymize contract.docx --mask-value "Project Falcon" --mask-pattern "TCK-\\d{6}"
+
     With --scan it reports what is there and changes nothing, which is the
     check to put in front of anything that leaves the machine.
     """
     from .privacy import Anonymizer, anonymize_comments, scan_comments
-    from .privacy.policy import PRESET_NAMES, resolve_policy
+    from .privacy.policy import resolve_policy
 
-    try:
-        resolved_policy = resolve_policy(policy.replace("-", "_"))
-    except ValueError:
-        raise typer.BadParameter(
-            f"unknown policy {policy!r}. Choose one of: "
-            + ", ".join(sorted(PRESET_NAMES)).replace("_", "-")
-        )
+    built = _build_policy(policy, mask_value, mask_pattern)
+    resolved_policy = resolve_policy(built if built is not None else True)
 
     comments = _load(file)
 
     if scan_only:
-        scan = scan_comments(comments)
+        scan = scan_comments(comments, policy=resolved_policy)
         console.print(Panel(scan.summary(), title="Privacy scan", expand=False))
         if fail_on_secret and scan.has_secrets:
             raise typer.Exit(code=1)
@@ -1234,6 +1418,99 @@ def anonymize(
         scan = scan_comments(comments)
         if scan.has_secrets:
             raise typer.Exit(code=1)
+
+
+@app.command("check-pattern")
+def check_pattern_command(
+    patterns: List[str] = typer.Argument(..., help="One or more regular expressions."),
+) -> None:
+    """Check custom masking patterns before using them.
+
+        docx-comments check-pattern "TCK-\\d{6}" "(unclosed"
+
+    Reports, for each pattern, whether it compiles, whether it can match empty
+    text, whether it would mask ordinary words, and whether it risks very slow
+    matching. Exits 1 when any pattern would be refused.
+    """
+    from .privacy.validation import check_pattern
+
+    refused = False
+    for index, pattern in enumerate(patterns, start=1):
+        issues = check_pattern(pattern, f"pattern-{index}")
+        if not issues:
+            console.print(f"[green]{GLYPH_OK}[/] {pattern}", highlight=False)
+            continue
+        for issue in issues:
+            refused = refused or issue.is_error
+            style = "bold red" if issue.is_error else "yellow"
+            label = "invalid" if issue.is_error else "warning"
+            console.print(f"[{style}]{label}[/] {issue.describe()}", highlight=False)
+    if refused:
+        raise typer.Exit(code=1)
+
+
+@app.command("check-response")
+def check_response_command(
+    prompt_file: Path = typer.Argument(
+        ..., exists=True, dir_okay=False, readable=True,
+        help="The prompt as written by 'prompt --json'.",
+    ),
+    response_file: Path = typer.Argument(
+        ..., exists=True, dir_okay=False, readable=True,
+        help="The model's answer, as text.",
+    ),
+    vault: Optional[Path] = typer.Option(
+        None, "--vault", help="Restore real names from this vault file."
+    ),
+    output: Optional[Path] = typer.Option(
+        None, "--output", "-o", help="Write the parsed (and restored) JSON here."
+    ),
+) -> None:
+    """Check a model's answer against the prompt that asked for it.
+
+        docx-comments check-response prompt.json answer.txt --vault names.json -o result.json
+
+    Extracts the JSON from the answer, verifies every cited comment id was in
+    the prompt, checks the required keys, and restores real names locally.
+    Exits 1 when the answer cites comments that were not in the prompt or
+    omits required keys.
+    """
+    from .llm.responses import ResponseParseError, parse_response
+    from .privacy import Vault
+
+    try:
+        prompt_data = json.loads(prompt_file.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise typer.BadParameter(
+            f"{prompt_file} is not JSON ({exc}). Write it with 'prompt --json'.",
+            param_hint="PROMPT_FILE",
+        )
+    restore = Vault.load(vault) if vault is not None else None
+    try:
+        parsed = parse_response(
+            prompt_data, response_file.read_text(encoding="utf-8"), anonymizer=restore
+        )
+    except ResponseParseError as exc:
+        err_console.print(f"[bold red]Unreadable answer:[/] {exc}")
+        raise typer.Exit(code=1)
+
+    lines = [
+        f"Kind              {parsed.kind or GLYPH_EMPTY}",
+        f"Comments cited    {len(parsed.cited)}",
+    ]
+    lines.extend(f"Problem           {problem}" for problem in parsed.problems())
+    if parsed.valid:
+        lines.append("Verified          every citation is in the prompt")
+    console.print(Panel("\n".join(lines), title="Response check", expand=False))
+
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(
+            json.dumps(parsed.data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        console.print(f"[green]{GLYPH_OK}[/] Wrote the parsed answer to [bold]{output}[/]")
+    if not parsed.valid:
+        raise typer.Exit(code=1)
 
 
 def _version_callback(value: bool) -> None:

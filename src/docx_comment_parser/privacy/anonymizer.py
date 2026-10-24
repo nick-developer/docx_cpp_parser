@@ -40,6 +40,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import threading
 from dataclasses import dataclass, replace
@@ -59,7 +60,7 @@ from typing import (
 )
 
 from ..models import Comment
-from .entities import EntityType, Span, merge_adjacent, resolve_spans
+from .entities import EntityType, Span, resolve_spans
 from .policy import (
     COMMENT_TEXT_FIELDS,
     AnonymizationPolicy,
@@ -103,6 +104,9 @@ _ROLE_LABELS: Mapping[EntityType, Tuple[str, ...]] = {
     EntityType.LOCATION: ("Location", "Place", "Site"),
 }
 
+#: The index at the end of a role-style stand-in: "Reviewer 12", "@user3".
+_TRAILING_NUMBER = re.compile(r"(\d+)$")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Vault
@@ -117,19 +121,29 @@ class Vault:
     that stays behind.  It is safe to share between threads.
     """
 
-    __slots__ = ("_forward", "_reverse", "_counters", "_lock")
+    __slots__ = (
+        "_forward", "_reverse", "_counters", "_lock", "_legacy",
+        "_entities", "_pattern", "_pattern_size",
+    )
 
     def __init__(self) -> None:
         self._forward: Dict[Tuple[EntityType, str], str] = {}
         self._reverse: Dict[str, str] = {}
         self._counters: Dict[EntityType, int] = {}
         self._lock = threading.Lock()
+        # original → placeholder for mappings loaded from a file that did not
+        # record entity types (v1.5.0 exports). Consulted before minting, so a
+        # reloaded vault gives a returning person their old stand-in.
+        self._legacy: Dict[str, str] = {}
+        self._entities: Dict[str, EntityType] = {}
+        self._pattern: Optional["re.Pattern[str]"] = None
+        self._pattern_size = -1
 
     def __len__(self) -> int:
-        return len(self._forward)
+        return len(self._reverse)
 
     def __contains__(self, original: object) -> bool:
-        return any(key[1] == original for key in self._forward)
+        return original in self._reverse.values()
 
     def get_or_create(
         self, entity: EntityType, original: str, make: PseudonymFactory
@@ -137,7 +151,11 @@ class Vault:
         """Return the stand-in for ``original``, minting one on first sight.
 
         The counter passed to ``make`` is 1-based per entity type, so the first
-        person seen is ``Reviewer 1``.
+        person seen is ``Reviewer 1``.  A minted stand-in is never one already
+        issued for a different value: two people sharing a placeholder would
+        merge them in the model's eyes and make reversal put the wrong name
+        back.  That cannot happen within one run, but it can once a vault is
+        reloaded or a short token digest collides, so it is checked here.
         """
         key = (entity, original)
         # Fast path outside the lock: after the first few comments every lookup
@@ -148,14 +166,28 @@ class Vault:
             return existing
 
         with self._lock:
-            existing = self._forward.get(key)
+            existing = self._forward.get(key) or self._legacy.get(original)
             if existing is not None:
+                self._forward[key] = existing
                 return existing
+
             index = self._counters.get(entity, 0) + 1
+            placeholder = base = make(entity, original, index)
+            suffix = 1
+            while self._reverse.get(placeholder, original) != original:
+                index += 1
+                candidate = make(entity, original, index)
+                if candidate == base:
+                    # The factory does not number its output (token style), so
+                    # a fresh index cannot help; disambiguate explicitly.
+                    suffix += 1
+                    candidate = f"{base}-{suffix}"
+                placeholder = candidate
+
             self._counters[entity] = index
-            placeholder = make(entity, original, index)
             self._forward[key] = placeholder
             self._reverse[placeholder] = original
+            self._entities[placeholder] = entity
             return placeholder
 
     def original_for(self, placeholder: str) -> Optional[str]:
@@ -165,10 +197,26 @@ class Vault:
     def placeholders(self) -> Tuple[str, ...]:
         """Every stand-in issued, longest first.
 
-        Longest first is what :meth:`Anonymizer.deanonymize` needs: replacing
-        ``Reviewer 1`` before ``Reviewer 11`` would corrupt the second.
+        Longest first is what reversal needs: matching ``Reviewer 1`` before
+        ``Reviewer 11`` would corrupt the second.
         """
         return tuple(sorted(self._reverse, key=len, reverse=True))
+
+    def restore(self, text: str) -> str:
+        """Replace every issued stand-in in ``text`` with its original.
+
+        One pass, with word boundaries, so ``Reviewer 1`` inside ``Reviewer 10``
+        is left alone and a restored name is never itself rewritten by a later
+        replacement.  The compiled pattern is cached until the vault grows.
+        """
+        if not text or not self._reverse:
+            return text
+        if self._pattern is None or self._pattern_size != len(self._reverse):
+            alternation = "|".join(re.escape(item) for item in self.placeholders())
+            self._pattern = re.compile(rf"(?<!\w)(?:{alternation})(?!\w)")
+            self._pattern_size = len(self._reverse)
+        reverse = self._reverse
+        return self._pattern.sub(lambda match: reverse[match.group()], text)
 
     def to_dict(self) -> Dict[str, str]:
         """A plain ``{placeholder: original}`` copy.
@@ -202,6 +250,13 @@ class Vault:
                         "Keep it separate from the export it belongs to."
                     ),
                     "mapping": self.to_dict(),
+                    # The type of each stand-in, so a reloaded vault can keep
+                    # minting where it left off instead of re-issuing
+                    # "Reviewer 1" to somebody new. Types only — no values.
+                    "entities": {
+                        placeholder: entity.value
+                        for placeholder, entity in self._entities.items()
+                    },
                 },
                 handle,
                 ensure_ascii=False,
@@ -211,16 +266,35 @@ class Vault:
 
     @classmethod
     def load(cls, path: PathLike) -> "Vault":
-        """Rebuild a vault from :meth:`export`, for de-anonymising later."""
+        """Rebuild a vault from :meth:`export`, for de-anonymising later.
+
+        The reloaded vault can also be handed to a new :class:`Anonymizer` to
+        extend an earlier export: returning people keep their stand-ins and new
+        people are numbered after the highest existing one.  Files written by
+        v1.5.0, which did not record entity types, load too; their stand-ins
+        are reused by value and never re-issued.
+        """
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
         mapping = payload.get("mapping", payload)
+        entities = payload.get("entities", {}) if "mapping" in payload else {}
         vault = cls()
         for placeholder, original in mapping.items():
             vault._reverse[placeholder] = original
-            # The entity type is not recorded — it is not needed to reverse a
-            # replacement, and leaving it out keeps the file to what it must
-            # contain and nothing more.
-            vault._forward[(EntityType.CUSTOM, original)] = placeholder
+            kind = entities.get(placeholder)
+            try:
+                entity = EntityType(kind) if kind else None
+            except ValueError:
+                entity = None
+            if entity is None:
+                vault._legacy.setdefault(original, placeholder)
+                continue
+            vault._forward[(entity, original)] = placeholder
+            vault._entities[placeholder] = entity
+            number = _TRAILING_NUMBER.search(placeholder)
+            if number is not None:
+                vault._counters[entity] = max(
+                    vault._counters.get(entity, 0), int(number.group(1))
+                )
         return vault
 
 
@@ -420,6 +494,8 @@ class Anonymizer:
                 custom_terms=self.policy.custom_terms,
                 custom_patterns=self.policy.custom_patterns,
                 detect_mentions=self.policy.detect_mentions,
+                organizations=self.policy.organizations,
+                locations=self.policy.locations,
             )
         )
         self._name_recognizer: Optional[NameRecognizer] = next(
@@ -444,12 +520,16 @@ class Anonymizer:
             if self.policy.covers(EntityType.PERSON):
                 self._pseudonym(EntityType.PERSON, name)
 
-        self._cache: Dict[str, str] = {}
+        # Short texts → (result, replacements per type, skipped). The counts
+        # travel with the cached result so a cache hit is reported exactly as
+        # the first occurrence was, instead of vanishing from the report.
+        self._cache: Dict[str, Tuple[str, Tuple[Tuple[EntityType, int], ...], int]] = {}
         self._cache_lock = threading.Lock()
 
         # Per-run counters, reset by :meth:`reset_stats`.
         self._counts: Dict[EntityType, int] = {}
         self._skipped = 0
+        self._stats_lock = threading.Lock()
 
     # ── Detection ───────────────────────────────────────────────────────────
 
@@ -460,40 +540,189 @@ class Anonymizer:
         confidence floor, which is what an audit wants: report what is there,
         not what would be replaced.
         """
+        spans, skipped = self._detect(text, all_entities=all_entities)
+        if skipped:
+            self._add_stats({}, skipped)
+        return spans
+
+    def _acts_on(self, span: Span) -> bool:
+        """True when the policy replaces this detection."""
+        return self.policy.covers(span.entity) and span.score >= self.policy.min_score
+
+    def _detect(self, text: str, *, all_entities: bool = False) -> Tuple[List[Span], int]:
+        """Detection without side effects: the spans to act on, and how many
+        detections were left in place for being under the confidence floor."""
         if not text:
-            return []
+            return [], 0
 
         found: List[Span] = []
         for recognizer in self._recognizers:
             if not recognizer.applies_to(text):
                 continue
             found.extend(recognizer.find(text))
+        if not found:
+            return [], 0
 
         # Overlaps are resolved over *every* detection, including those the
         # policy will not act on, and only then filtered. The order matters:
         # filtering first would let the PERSON inside bob.reviewer@acme.com win
-        # under a names-only policy, replacing the local part and publishing the
-        # domain. A span the policy keeps must still shield what sits inside it.
+        # when email addresses are covered, replacing the local part and
+        # publishing the domain.
         resolved = resolve_spans(found)
-        if not all_entities:
-            kept: List[Span] = []
-            for span in resolved:
-                if not self.policy.covers(span.entity):
-                    continue
-                if span.score < self.policy.min_score:
-                    self._skipped += 1
-                    continue
-                kept.append(span)
-            resolved = kept
+        if all_entities:
+            return self._merge_people(text, resolved), 0
 
-        # Only people get joined across a space: "Alice" "Tester" is one person,
-        # whereas two adjacent card numbers are two card numbers.
-        if any(span.entity is EntityType.PERSON for span in resolved):
-            resolved = merge_adjacent(
-                [s for s in resolved if s.entity is EntityType.PERSON]
-            ) + [s for s in resolved if s.entity is not EntityType.PERSON]
-            resolved.sort(key=lambda span: span.start)
-        return resolved
+        kept: List[Span] = []
+        passed_over: List[Span] = []
+        skipped = 0
+        for span in resolved:
+            if self._acts_on(span):
+                kept.append(span)
+                continue
+            if self.policy.covers(span.entity):
+                skipped += 1
+            passed_over.append(span)
+
+        # A span the policy leaves alone must not shield what sits inside it.
+        # Under the balanced preset URLs are kept, and the URL detector is the
+        # longest match over https://wiki/u/alice.tester?mail=bob@corp.example
+        # -- without this pass the name and the address inside it would be
+        # published verbatim, and the verification pass, which uses the same
+        # resolution, would not see them either.
+        if passed_over:
+            # Candidates that collide with an already accepted span are removed
+            # *before* resolving: otherwise a long span straddling the kept
+            # region's edge (a card-shaped run across two SSNs, say) would win
+            # the inner contest, then be discarded for overlapping, taking the
+            # value inside the region down with it.
+            inner = [
+                span
+                for span in found
+                if self._acts_on(span)
+                and any(span.overlaps(region) for region in passed_over)
+                and not any(span.overlaps(other) for other in kept)
+            ]
+            kept.extend(resolve_spans(inner))
+            kept.sort(key=lambda span: span.start)
+
+        return self._merge_people(text, self._absorb(text, kept, found)), skipped
+
+    def _absorb(self, text: str, kept: List[Span], found: List[Span]) -> List[Span]:
+        """Grow each replaced span over any acted-on detection it partly overlaps.
+
+        Resolution keeps one of two overlapping detections, which is right when
+        one contains the other and wrong when they only overlap: in
+        ``https://x.example/?q=+44 20 7946 0958`` the URL ends at the space and
+        the phone number starts inside it, and replacing either one leaves the
+        other's tail -- ``20 7946 0958`` -- in plain sight.  When both are to be
+        replaced, replacing their union is the safe answer.
+        """
+        if len(found) < 2 or not kept:
+            return kept
+        acting = [span for span in found if self._acts_on(span)]
+        changed = True
+        while changed:
+            changed = False
+            for index, span in enumerate(kept):
+                start, end = span.start, span.end
+                for other in acting:
+                    if other.overlaps(span) and (other.start < start or other.end > end):
+                        start, end = min(start, other.start), max(end, other.end)
+                if (start, end) != (span.start, span.end):
+                    kept[index] = Span(
+                        start, end, span.entity, text[start:end], span.score, span.recognizer
+                    )
+                    changed = True
+            if changed:
+                # Grown spans may now overlap each other; fold them together,
+                # keeping the more specific type for the label.
+                kept.sort(key=lambda span: span.start)
+                folded: List[Span] = []
+                for span in kept:
+                    if folded and span.start < folded[-1].end:
+                        previous = folded[-1]
+                        winner = previous if previous.specificity >= span.specificity else span
+                        start, end = previous.start, max(previous.end, span.end)
+                        folded[-1] = Span(
+                            start, end, winner.entity, text[start:end],
+                            min(previous.score, span.score), winner.recognizer,
+                        )
+                    else:
+                        folded.append(span)
+                kept = folded
+        return kept
+
+    def _merge_people(self, text: str, spans: List[Span]) -> List[Span]:
+        """Join name parts that belong to one person into one span.
+
+        ``Tester Alice`` is two detections and one person; replacing each part
+        would write ``Reviewer 1 Reviewer 1`` and leak that the name has two
+        parts.  Parts are joined only across whitespace, only when both
+        resolve to the *same* roster person — ``Alice, Bob`` is two people, and
+        welding them into one stand-in would lose both identities — and only
+        when they are two different *partial* spellings: ``Alice Tester Alice
+        Tester`` is two mentions, and merging them would make reversal return
+        one.
+        """
+        if self._name_recognizer is None or not any(
+            span.entity is EntityType.PERSON for span in spans
+        ):
+            return spans
+
+        def joinable(left: Span, right: Span, gap: str) -> bool:
+            if gap.strip():
+                return False
+            owner = self._person_of(left.text)
+            if owner is None or owner != self._person_of(right.text):
+                return False
+            full = owner.casefold()
+            first = " ".join(left.text.split()).casefold()
+            second = " ".join(right.text.split()).casefold()
+            return first != second and full not in (first, second)
+
+        merged: List[Span] = []
+        for span in spans:
+            previous = merged[-1] if merged else None
+            if (
+                previous is not None
+                and previous.entity is EntityType.PERSON
+                and span.entity is EntityType.PERSON
+                and joinable(previous, span, text[previous.end:span.start])
+            ):
+                merged[-1] = Span(
+                    start=previous.start,
+                    end=span.end,
+                    entity=EntityType.PERSON,
+                    text=text[previous.start:span.end],
+                    score=min(previous.score, span.score),
+                    recognizer=previous.recognizer,
+                )
+            else:
+                merged.append(span)
+        return merged
+
+    def _person_of(self, spelling: str) -> Optional[str]:
+        """The roster name a spelling belongs to, including multi-part ones."""
+        if self._name_recognizer is None:
+            return None
+        canonical = self._name_recognizer.canonical(spelling)
+        if canonical is not None:
+            return canonical
+        # "Tester Alice" is not itself a roster spelling, but each of its parts
+        # is, and when they all belong to one person so does the whole.
+        parts = spelling.split()
+        if len(parts) < 2:
+            return None
+        owners = {self._name_recognizer.canonical(part) for part in parts}
+        if len(owners) == 1:
+            return owners.pop()
+        return None
+
+    def _add_stats(self, counts: Mapping[EntityType, int], skipped: int) -> None:
+        with self._stats_lock:
+            for entity, count in counts.items():
+                self._counts[entity] = self._counts.get(entity, 0) + count
+            self._skipped += skipped
 
     # ── Replacement ─────────────────────────────────────────────────────────
 
@@ -543,8 +772,8 @@ class Anonymizer:
         matched text is the key, case-folded for types where case carries no
         meaning.
         """
-        if span.entity is EntityType.PERSON and self._name_recognizer is not None:
-            canonical = self._name_recognizer.canonical(span.text)
+        if span.entity is EntityType.PERSON:
+            canonical = self._person_of(span.text)
             if canonical is not None:
                 return canonical
         if span.entity in {EntityType.EMAIL, EntityType.USERNAME, EntityType.URL}:
@@ -596,28 +825,31 @@ class Anonymizer:
         if cacheable:
             hit = self._cache.get(text)
             if hit is not None:
-                return hit
+                result, cached_counts, cached_skipped = hit
+                if cached_counts or cached_skipped:
+                    self._add_stats(dict(cached_counts), cached_skipped)
+                return result
 
-        spans = self.scan(text)
+        spans, skipped = self._detect(text)
+        counts: Dict[EntityType, int] = {}
         if not spans:
-            if cacheable:
-                with self._cache_lock:
-                    self._cache[text] = text
-            return text
+            result = text
+        else:
+            pieces: List[str] = []
+            cursor = 0
+            for span in spans:
+                pieces.append(text[cursor:span.start])
+                pieces.append(self.replacement_for(span))
+                cursor = span.end
+                counts[span.entity] = counts.get(span.entity, 0) + 1
+            pieces.append(text[cursor:])
+            result = "".join(pieces)
 
-        pieces: List[str] = []
-        cursor = 0
-        for span in spans:
-            pieces.append(text[cursor:span.start])
-            pieces.append(self.replacement_for(span))
-            cursor = span.end
-            self._counts[span.entity] = self._counts.get(span.entity, 0) + 1
-        pieces.append(text[cursor:])
-
-        result = "".join(pieces)
+        if counts or skipped:
+            self._add_stats(counts, skipped)
         if cacheable:
             with self._cache_lock:
-                self._cache[text] = result
+                self._cache[text] = (result, tuple(counts.items()), skipped)
         return result
 
     def anonymize_name(self, name: str) -> str:
@@ -626,17 +858,20 @@ class Anonymizer:
         Distinct from :meth:`anonymize_text` because there is nothing to detect:
         the whole value is the name, so a roster miss must not leave it intact.
         """
+        replaced = self._name_replacement(name)
+        if replaced != name:
+            self._add_stats({EntityType.PERSON: 1}, 0)
+        return replaced
+
+    def _name_replacement(self, name: str) -> str:
+        """The replacement for a whole-name field, without touching the stats."""
         cleaned = name.strip()
         if not cleaned:
             return name
         if not self.policy.covers(EntityType.PERSON):
             return name
 
-        canonical = (
-            self._name_recognizer.canonical(cleaned)
-            if self._name_recognizer is not None
-            else None
-        ) or cleaned
+        canonical = self._person_of(cleaned) or cleaned
         strategy = self.policy.strategy_for(EntityType.PERSON)
         if strategy is Strategy.REDACT:
             return f"[{EntityType.PERSON.value}]"
@@ -646,7 +881,6 @@ class Anonymizer:
             return self._mask(cleaned)
         if strategy is Strategy.HASH:
             return f"PERSON_{self._digest(EntityType.PERSON, canonical)[:8]}"
-        self._counts[EntityType.PERSON] = self._counts.get(EntityType.PERSON, 0) + 1
         return self._pseudonym(EntityType.PERSON, canonical)
 
     def _initials_for(self, author: str) -> str:
@@ -654,9 +888,10 @@ class Anonymizer:
 
         Derived from the stand-in rather than from the real name, because
         keeping ``AT`` beside ``Reviewer 1`` would re-identify Alice Tester to
-        anyone who has seen the original.
+        anyone who has seen the original.  Not counted as a replacement of its
+        own: it is the same person as the author field beside it.
         """
-        replaced = self.anonymize_name(author)
+        replaced = self._name_replacement(author)
         letters = [part[0] for part in replaced.split() if part and part[0].isalnum()]
         digits = [char for char in replaced if char.isdigit()]
         initials = "".join(letters[:2]).upper()
@@ -712,7 +947,9 @@ class Anonymizer:
         issued = self.vault.placeholders()
         residual: List[Span] = []
         for text in texts:
-            spans = self.scan(text)
+            # _detect, not scan: re-reading the output must not count its
+            # below-threshold detections as skipped a second time.
+            spans, _ = self._detect(text)
             if not spans:
                 continue
             # Locate the stand-ins in this text once, then drop any detection
@@ -735,27 +972,25 @@ class Anonymizer:
     def deanonymize(self, text: str) -> str:
         """Put the real values back — for a model's *answer*, on your machine.
 
-        Only stand-ins that were actually issued are reversed, longest first so
-        ``Reviewer 1`` cannot eat the front of ``Reviewer 11``.  Redacted and
-        hashed values are not reversible by design and are left as they are.
+        Only stand-ins that were actually issued are reversed, in one pass with
+        word boundaries, so ``Reviewer 1`` cannot eat the front of ``Reviewer
+        11`` or of a ``Reviewer 10`` the model invented.  Redacted and hashed
+        values are not reversible by design and are left as they are.
         """
-        result = text
-        for placeholder in self.vault.placeholders():
-            original = self.vault.original_for(placeholder)
-            if original is not None and placeholder in result:
-                result = result.replace(placeholder, original)
-        return result
+        return self.vault.restore(text)
 
     # ── Run bookkeeping ─────────────────────────────────────────────────────
 
     def reset_stats(self) -> None:
         """Zero the per-run counters without discarding the vault."""
-        self._counts = {}
-        self._skipped = 0
+        with self._stats_lock:
+            self._counts = {}
+            self._skipped = 0
 
     def stats(self) -> Tuple[Dict[EntityType, int], int]:
         """Replacements per entity type, and how many were skipped as too weak."""
-        return dict(self._counts), self._skipped
+        with self._stats_lock:
+            return dict(self._counts), self._skipped
 
 
 # ─────────────────────────────────────────────────────────────────────────────

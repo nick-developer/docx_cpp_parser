@@ -135,7 +135,7 @@ ext = Extension(
 
 setup(
     name="docx-comment-parser",
-    version="1.5.0",
+    version="1.5.1",
     author="nick-developer",
     description="Fast C++ library for extracting comment metadata from .docx files",
     long_description=_read_long_description(),
@@ -156,9 +156,13 @@ setup(
         "polars": ["polars>=1.0"],
         "cli": ["typer>=0.12", "rich>=13.0"],
         "report": ["jinja2>=3.0"],
+        # Kept in step with pyproject.toml: accelerated fuzzy matching for the
+        # diff engine, and exact token counts for chunking and compression.
+        "diff": ["rapidfuzz>=3.0"],
+        "llm": ["tiktoken>=0.7"],
         "all": [
             "pandas>=2.0", "polars>=1.0", "typer>=0.12", "rich>=13.0",
-            "jinja2>=3.0",
+            "jinja2>=3.0", "rapidfuzz>=3.0", "tiktoken>=0.7",
         ],
     },
     entry_points={

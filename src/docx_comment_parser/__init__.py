@@ -25,6 +25,15 @@ private parts replaced first, if you ask::
     records = parser.to_llm_dataset(anonymize="strict")
     parser.export_jsonl("review.jsonl")
 
+and in 1.5.1 you choose how much of the document comes with each comment, fix
+the classifier's tags by hand, and spend fewer tokens doing it::
+
+    records = parser.to_llm_dataset(
+        context={"unit": "sentences", "before": 2, "after": 1},
+        overrides={4: {"priority": "blocker"}},
+        compress="balanced",
+    )
+
 Export methods are attached to the compiled ``DocxParser`` / ``BatchParser``
 classes at import time.  That is deliberate: it keeps a single parser object as
 the one thing a user needs to hold, rather than introducing a second wrapper
@@ -72,7 +81,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from .privacy.policy import AnonymizationPolicy
     from .reporting.analytics import build_report_data
 
-__version__ = "1.5.0"
+__version__ = "1.5.1"
 
 __all__ = [
     # compiled core (unchanged public API)
@@ -319,11 +328,14 @@ def _parser_to_llm_records(
     classify: bool = True,
     anonymize: Optional[Any] = None,
     anonymizer: Optional[Any] = None,
+    **kwargs: Any,
 ) -> "LLMDataset":
     """Return this document's comments as an :class:`LLMDataset`.
 
     The object form of :meth:`to_llm_dataset`: same records, plus the
-    anonymisation report and the vault that reverses it.
+    anonymisation report and the vault that reverses it.  Also takes
+    ``context=`` (sentences, paragraphs, words), ``overrides=`` (manual tags)
+    and ``compress=`` (token reduction) — see ``llm.build_dataset``.
     """
     from .llm.dataset import build_dataset
 
@@ -336,6 +348,7 @@ def _parser_to_llm_records(
         classify=classify,
         anonymize=anonymize,
         anonymizer=anonymizer,
+        **kwargs,
     )
 
 
@@ -380,6 +393,17 @@ def _parser_to_embeddings_input(
     )
 
 
+#: build_dataset keywords that to_llm_chunks forwards, as opposed to the
+#: chunking keywords it passes to Chunk packing.
+_DATASET_OPTIONS = frozenset(
+    {
+        "chars_before", "chars_after", "include_thread", "include_context",
+        "classify", "anonymize", "anonymizer", "documents", "context",
+        "overrides", "compress",
+    }
+)
+
+
 def _parser_to_llm_chunks(
     self: DocxParser, max_tokens: int = 100_000, **kwargs: Any
 ) -> List[Any]:
@@ -387,10 +411,7 @@ def _parser_to_llm_chunks(
     dataset_kwargs = {
         key: kwargs.pop(key)
         for key in list(kwargs)
-        if key in {
-            "chars_before", "chars_after", "include_thread",
-            "include_context", "classify", "anonymize", "anonymizer",
-        }
+        if key in _DATASET_OPTIONS
     }
     return _parser_to_llm_records(self, **dataset_kwargs).chunks(max_tokens, **kwargs)
 

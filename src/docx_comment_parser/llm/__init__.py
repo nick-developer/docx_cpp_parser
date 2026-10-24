@@ -8,29 +8,43 @@ that the answer is worth reading.*
     prompt  = create_action_items_prompt(...)  # packed, budgeted, id-cited
     docs    = parser.to_embeddings_input()     # one document per thread, for RAG
 
-Five modules, in the order the work happens:
+The modules, in the order the work happens:
 
 :mod:`.context`
     Reads ``word/document.xml`` back to recover the text either side of each
     comment's anchor — the part that turns "this is wrong" into a question with
-    an answer.  Standard library, on demand, cached per document.
+    an answer.  Measured in characters, words, sentences or paragraphs (see
+    :class:`~.context.ContextSpec`).  Standard library, on demand, cached per
+    document.
 
 :mod:`.classification`
     Rule-based category, intent and priority.  Microseconds, explainable, and
     entirely local; it is what lets a prompt say "the 12 compliance comments"
     instead of paying a model to work that out.
 
+:mod:`.overrides`
+    Manual corrections to those tags — from code, a dict, or a spreadsheet —
+    validated and recorded as human labels.
+
 :mod:`.dataset`
     :class:`~.dataset.LLMRecord` and the exports built on it — dicts, JSONL, a
     DataFrame, retrieval documents.
+
+:mod:`.compression`
+    Fewer tokens for the same review: whitespace, thread de-duplication,
+    query-focused sentence extraction, filler removal.
 
 :mod:`.chunking`
     Fitting a corpus into a context window without splitting a thread in half.
     Exact under ``tiktoken``, calibrated without it.
 
-:mod:`.prompts`
-    Six prompt builders that pack the corpus, state what did not fit, and
-    require every claim to cite a comment id.
+:mod:`.prompts` and :mod:`.safety`
+    Six prompt builders that pack the corpus, state what did not fit, require
+    every claim to cite a comment id, and treat the review as untrusted data.
+
+:mod:`.responses`
+    Reading the answer back: JSON extraction, citation checking, names
+    restored, and a triage answer turned into overrides.
 
 There are no AI dependencies here and no network calls anywhere — the roadmap's
 first acceptance criterion.  Nothing in this package sends anything; it produces
@@ -58,7 +72,14 @@ from .classification import (
     classify_comments,
     classify_text,
 )
-from .context import ContextWindow, DocumentContext
+from .compression import (
+    COMPRESSION_LEVELS,
+    CompressionConfig,
+    CompressionStats,
+    compress_context,
+    compress_records,
+)
+from .context import CONTEXT_UNITS, ContextSpec, ContextWindow, DocumentContext, split_sentences
 from .dataset import (
     LLMDataset,
     LLMRecord,
@@ -67,6 +88,13 @@ from .dataset import (
     to_embeddings_input,
     to_jsonl,
     to_llm_dataset,
+)
+from .overrides import (
+    OVERRIDABLE_FIELDS,
+    OverrideError,
+    apply_overrides,
+    export_labels,
+    load_overrides,
 )
 from .prompts import (
     Prompt,
@@ -77,8 +105,40 @@ from .prompts import (
     create_risk_prompt,
     create_triage_prompt,
 )
+from .responses import (
+    ParsedResponse,
+    ResponseParseError,
+    extract_json,
+    overrides_from_response,
+    parse_response,
+)
+from .safety import screen_records, screen_text
 
 __all__ = [
+    # context (new in 1.5.1: sentence / paragraph / word windows)
+    "ContextSpec",
+    "CONTEXT_UNITS",
+    "split_sentences",
+    # manual classification (new in 1.5.1)
+    "apply_overrides",
+    "load_overrides",
+    "export_labels",
+    "OverrideError",
+    "OVERRIDABLE_FIELDS",
+    # compression (new in 1.5.1)
+    "compress_records",
+    "compress_context",
+    "CompressionConfig",
+    "CompressionStats",
+    "COMPRESSION_LEVELS",
+    # responses and safety (new in 1.5.1)
+    "parse_response",
+    "extract_json",
+    "overrides_from_response",
+    "ParsedResponse",
+    "ResponseParseError",
+    "screen_text",
+    "screen_records",
     # dataset
     "to_llm_dataset",
     "build_dataset",

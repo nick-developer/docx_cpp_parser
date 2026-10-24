@@ -26,7 +26,12 @@ Four modules, in the order the work happens:
 
 :mod:`.policy`
     Which findings to act on and how — redact, pseudonymise, mask, hash,
-    remove — with presets from ``names_only`` through ``gdpr``.
+    remove — with presets from ``names_only`` through ``gdpr``, plus your own
+    values and regular expressions (:func:`~.policy.make_policy`).
+
+:mod:`.validation`
+    Checks those values and patterns before they are trusted, and says what is
+    wrong with one that is not.
 
 :mod:`.anonymizer`
     The engine, the local vault that can put the real names back into a model's
@@ -60,7 +65,15 @@ from .policy import (
     AnonymizationPolicy,
     PolicyLike,
     Strategy,
+    make_policy,
     resolve_policy,
+)
+from .validation import (
+    InvalidPatternError,
+    PatternIssue,
+    check_pattern,
+    validate_patterns,
+    validate_values,
 )
 from .recognizers import (
     NameRecognizer,
@@ -82,6 +95,13 @@ __all__ = [
     "PolicyLike",
     "PRESET_NAMES",
     "resolve_policy",
+    "make_policy",
+    # the caller's own values and patterns (new in 1.5.1)
+    "check_pattern",
+    "validate_patterns",
+    "validate_values",
+    "PatternIssue",
+    "InvalidPatternError",
     # engine and results
     "Anonymizer",
     "Vault",
