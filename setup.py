@@ -28,6 +28,15 @@ import subprocess
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
 
+def _read_long_description() -> str:
+    """Return README.md's contents, or an empty string if it is absent."""
+    readme = os.path.join(ROOT, "README.md")
+    if not os.path.exists(readme):
+        return ""
+    with open(readme, encoding="utf-8") as fh:
+        return fh.read()
+
+
 def _is_mingw() -> bool:
     """Return True when building with MinGW-w64 GCC under Windows."""
     if sys.platform != "win32":
@@ -126,14 +135,10 @@ ext = Extension(
 
 setup(
     name="docx-comment-parser",
-    version="1.3.0",
+    version="1.5.0",
     author="nick-developer",
     description="Fast C++ library for extracting comment metadata from .docx files",
-    long_description=(
-        open(os.path.join(ROOT, "README.md"), encoding="utf-8").read()
-        if os.path.exists(os.path.join(ROOT, "README.md"))
-        else ""
-    ),
+    long_description=_read_long_description(),
     long_description_content_type="text/markdown",
     ext_modules=[ext],
     # Pure-Python wrapper package (exporters, filters, CLI) lives in src/.

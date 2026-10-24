@@ -33,7 +33,7 @@ type that would have to mirror the C++ API forever.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Sequence, Union
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Union
 
 # ─── Compiled core ───────────────────────────────────────────────────────────
 # Re-exported verbatim so `dcp.DocxParser` etc. resolve exactly as they did
@@ -60,7 +60,17 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     import pandas
     import polars
 
-    from .llm.dataset import LLMDataset
+    # The lazily resolved names below (see ``_LAZY``), declared here so static
+    # analysers can see every entry of ``__all__``.  Never executed at runtime.
+    from . import comparison, llm, privacy, reporting
+    from .comparison.diff_engine import DiffResult, compare_comments
+    from .llm.chunking import estimate_tokens
+    from .llm.classification import classify_comment
+    from .llm.dataset import LLMDataset, LLMRecord
+    from .llm.dataset import build_dataset as build_llm_dataset
+    from .privacy.anonymizer import Anonymizer, anonymize_comments, scan_comments
+    from .privacy.policy import AnonymizationPolicy
+    from .reporting.analytics import build_report_data
 
 __version__ = "1.5.0"
 
